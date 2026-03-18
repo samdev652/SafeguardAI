@@ -1,0 +1,38 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "ward_name": "Westlands",
+        "county_name": "Nairobi"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[36.779, -1.249], [36.836, -1.249], [36.836, -1.286], [36.779, -1.286], [36.779, -1.249]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "ward_name": "Parklands/Highridge",
+        "county_name": "Nairobi"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[36.804, -1.257], [36.846, -1.257], [36.846, -1.281], [36.804, -1.281], [36.804, -1.257]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "ward_name": "Starehe",
+        "county_name": "Nairobi"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[36.812, -1.272], [36.858, -1.272], [36.858, -1.309], [36.812, -1.309], [36.812, -1.272]]]
+      }
+    }
+  ]
+}

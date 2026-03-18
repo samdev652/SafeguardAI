@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+.venv/
+venv/
+.pytest_cache/
+
+# Django
+backend/db.sqlite3
+backend/staticfiles/
+backend/media/
+
+# Node
+node_modules/
+.next/
+out/
+
+# Logs
+*.log
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/

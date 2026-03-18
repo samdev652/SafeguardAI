@@ -1,0 +1,16 @@
+from django.urls import path
+from .views import (
+    LatestRiskAssessmentsView,
+    TriggerIngestionView,
+    WardHeatmapGeoJSONView,
+    WardRiskView,
+    risk_events_stream,
+)
+
+urlpatterns = [
+    path('risks/', LatestRiskAssessmentsView.as_view(), name='risk-list'),
+    path('risks/ward/<str:ward_name>/', WardRiskView.as_view(), name='ward-risk-list'),
+    path('risks/ward-heatmap/', WardHeatmapGeoJSONView.as_view(), name='ward-heatmap-geojson'),
+    path('risks/events/', risk_events_stream, name='risk-events-stream'),
+    path('ingest/trigger/', TriggerIngestionView.as_view(), name='ingest-trigger'),
+]
