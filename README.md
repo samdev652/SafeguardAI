@@ -47,6 +47,23 @@ Production-oriented full-stack foundation for Kenya's AI-powered multi-hazard ea
 - County Portal (`/county/*`): Role-protected operations center for county disaster management teams.
 - Dashboard (`/dashboard`): Authenticated live operational view for ongoing monitoring and action.
 
+## Screenshots
+
+Current visual assets available in-repo:
+
+| Flow | Preview |
+|---|---|
+| Location step illustration | ![Location Step](frontend/public/illustrations/location.svg) |
+| Channel selection illustration | ![Channel Step](frontend/public/illustrations/channels.svg) |
+| Phone verification illustration | ![Phone Step](frontend/public/illustrations/phone.svg) |
+
+To add real product screenshots, place files under `docs/screenshots/` and reference them in this section, for example:
+
+- `docs/screenshots/landing.png`
+- `docs/screenshots/register.png`
+- `docs/screenshots/threats.png`
+- `docs/screenshots/county-overview.png`
+
 ## GeoDjango Setup (Cross-Platform)
 
 GeoDjango can auto-discover GDAL on many systems. Only set `GDAL_LIBRARY_PATH` in `backend/.env` if startup fails with a GDAL error.
@@ -106,7 +123,6 @@ Frontend:
 1. `cd frontend`
 2. `npm install`
 3. `npm run dev`
-4. Optional fallback: `npm run dev:legacy`
 
 Notes:
 - Prefer running backend commands from `backend/` with `./venv/bin/python ...`
