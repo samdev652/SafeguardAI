@@ -2,127 +2,192 @@
 
 Production-oriented full-stack foundation for Kenya's AI-powered multi-hazard early warning and anticipatory disaster response platform.
 
+## Recent Changes
+
+- Public trust surfaces added: `/`, `/register`, `/threats`, `/threats/[id]`, `/how-it-works`, `/download`
+- Public OTP-first phone subscription flow (no password required)
+- Public threat share links with metadata-friendly detail pages
+- County officials role-protected portal under `/county/*`
+- New county analytics, alert history export, incident management, and dispatch log APIs
+- Public coverage analytics endpoint for map choropleth
+- Faster local frontend rebuilds using Turbopack (`npm run dev`)
+
 ## Stack
 
-- Frontend: Next.js 14 (App Router), React, Leaflet, mobile-first map UI
+- Frontend: Next.js 14 (App Router), React, Leaflet, Framer Motion, Recharts
 - Backend: Django 5, Django REST Framework, Simple JWT, GeoDjango
 - Geospatial: PostGIS (via GeoDjango)
-- Async jobs: Celery + Redis (ingestion and alert dispatch)
+- Async jobs: Celery + Redis
 - AI analysis: Google Gemini 1.5 Flash API
 - Alert channels: Africa's Talking (SMS), WhatsApp Cloud API
 
 ## Monorepo Structure
 
 - `backend/`: Django API, Celery tasks, hazard analysis, rescue routing
-- `frontend/`: Next.js dashboard, onboarding, map-first alert UX
+- `frontend/`: Next.js public pages, dashboards, map UX, auth
+
+## Route Map (Frontend)
+
+- `/`: public landing page with live threat highlights
+- `/register`: public 3-step alert registration (location -> channels -> OTP)
+- `/threats`: public full live feed (map + filters + share)
+- `/threats/[id]`: public threat detail page with share metadata
+- `/how-it-works`: public trust/education page with process + FAQ + coverage
+- `/download`: app download/waitlist page
+- `/dashboard`: authenticated user dashboard
+- `/county/overview` and `/county/*`: county officials portal (role protected)
+
+## Page Tour
+
+- Landing (`/`): Public trust entry point with live threat highlights, map preview, and quick actions.
+- Register (`/register`): Fast 3-step signup for alert channels using OTP phone verification.
+- Threats (`/threats`): Public nationwide live feed with map, filters, sorting, and share actions.
+- Threat Detail (`/threats/[id]`): Share-friendly threat card with metadata-rich preview content.
+- How It Works (`/how-it-works`): Plain-language explainer for citizens, county officials, and NGO partners.
+- County Portal (`/county/*`): Role-protected operations center for county disaster management teams.
+- Dashboard (`/dashboard`): Authenticated live operational view for ongoing monitoring and action.
 
 ## GeoDjango Setup (Cross-Platform)
 
-GeoDjango can auto-discover GDAL on many systems. Only set `GDAL_LIBRARY_PATH` in `backend/.env` if startup fails with a GDAL error. Do not copy Linux paths to other OSes.
+GeoDjango can auto-discover GDAL on many systems. Only set `GDAL_LIBRARY_PATH` in `backend/.env` if startup fails with a GDAL error.
 
-- Linux (Ubuntu/Debian):
-	- Install: `sudo apt-get install -y gdal-bin libgdal-dev postgis`
-	- Typical path: `GDAL_LIBRARY_PATH=/lib/x86_64-linux-gnu/libgdal.so`
-- macOS (Homebrew):
-	- Install: `brew install gdal postgis`
-	- Typical path on Apple Silicon: `GDAL_LIBRARY_PATH=/opt/homebrew/lib/libgdal.dylib`
-	- Typical path on Intel: `GDAL_LIBRARY_PATH=/usr/local/lib/libgdal.dylib`
-- Windows:
-	- Install GDAL through OSGeo4W or conda-forge
-	- Set `GDAL_LIBRARY_PATH` to the GDAL DLL path, e.g. `C:\\OSGeo4W\\bin\\gdalXXX.dll`
+Linux (Ubuntu/Debian):
+- Install: `sudo apt-get install -y gdal-bin libgdal-dev postgis`
+- Typical path: `GDAL_LIBRARY_PATH=/lib/x86_64-linux-gnu/libgdal.so`
+
+macOS (Homebrew):
+- Install: `brew install gdal postgis`
+- Apple Silicon path: `GDAL_LIBRARY_PATH=/opt/homebrew/lib/libgdal.dylib`
+- Intel path: `GDAL_LIBRARY_PATH=/usr/local/lib/libgdal.dylib`
+
+Windows:
+- Install GDAL via OSGeo4W or conda-forge
+- Set `GDAL_LIBRARY_PATH` to your GDAL DLL path, e.g. `C:\OSGeo4W\bin\gdalXXX.dll`
 
 If your app starts without GDAL errors, leave `GDAL_LIBRARY_PATH` unset.
 
-PostgreSQL/PostGIS minimum setup:
+### PostgreSQL / PostGIS minimum setup
 
-- Create DB user and DB:
-	- `CREATE USER safeguard_user WITH PASSWORD 'your_password';`
-	- `CREATE DATABASE safeguard_ai OWNER safeguard_user;`
-- Enable PostGIS in the DB:
-	- `\c safeguard_ai`
-	- `CREATE EXTENSION IF NOT EXISTS postgis;`
+- `CREATE USER safeguard_user WITH PASSWORD 'your_password';`
+- `CREATE DATABASE safeguard_ai OWNER safeguard_user;`
+- Connect to DB: `\c safeguard_ai`
+- `CREATE EXTENSION IF NOT EXISTS postgis;`
 
-## Quick Start (Local)
+## Quick Start
 
-1. Copy env values:
+### Docker
+
+1. Copy env files:
 - `cp backend/.env.example backend/.env`
 - `cp frontend/.env.example frontend/.env.local`
 
 2. Start services:
 - `docker compose up --build`
 
-3. Initialize demo data:
+3. Seed data:
 - `docker compose exec backend python manage.py createsuperuser`
 - `docker compose exec backend python manage.py seed_demo_data`
 - `docker compose exec backend python manage.py load_ward_boundaries --file /app/data/kenya_wards_sample.geojson`
 
-4. Open apps:
+4. Open:
 - Frontend: `http://localhost:3000`
 - Backend API: `http://localhost:8000`
 - Django Admin: `http://localhost:8000/admin`
 
+### Native local (no Docker)
+
+Backend:
+1. `cd backend`
+2. `./venv/bin/python -m pip install -r requirements.txt`
+3. `./venv/bin/python manage.py migrate`
+4. `./venv/bin/python manage.py runserver 0.0.0.0:8000`
+
+Frontend:
+1. `cd frontend`
+2. `npm install`
+3. `npm run dev`
+4. Optional fallback: `npm run dev:legacy`
+
+Notes:
+- Prefer running backend commands from `backend/` with `./venv/bin/python ...`
+- If GeoDjango fails to boot, set `GDAL_LIBRARY_PATH` in `backend/.env`
+- Ensure `NEXTAUTH_BACKEND_URL` points to backend (typically `http://localhost:8000`)
+
 ## Core API Endpoints
 
-- `POST /api/citizens/register/`: citizen onboarding payload
-- `GET /api/hazards/risks/`: latest risk assessments
-- `GET /api/hazards/risks/ward-heatmap/`: GeoJSON ward boundaries with latest risk metadata
-- `GET /api/hazards/risks/events/`: SSE event stream for live risk updates
-- `GET /api/rescue/units/nearest/?latitude=-1.28&longitude=36.81`: nearest 3 units via PostGIS `ST_Distance`
-- `POST /api/rescue/sos/dispatch/`: authenticated SOS dispatch
-- `GET /api/alerts/my/`: authenticated citizen alerts
+### Public trust endpoints
 
-## Throughput and 500+ Concurrent Users
+- `GET /api/risk/current/` (optional `?ward=`)
+- `GET /api/risk/count/`
+- `GET /api/stats/public/`
+- `GET /api/stats/coverage/`
+- `GET /api/locations/search/?q=`
+- `GET /api/hazards/risks/ward-heatmap/`
 
-Recommended baseline configuration:
+### Public registration endpoints
 
-- Django app pods/instances: 2-3 (each `gunicorn --workers 4 --threads 4`)
-- Celery workers: 2 nodes, concurrency 4-8 each
+- `POST /api/alerts/otp/send/`
+- `POST /api/alerts/otp/verify/`
+- `POST /api/alerts/subscribe/`
+
+### Operational endpoints
+
+- `GET /api/rescue/units/nearest/?latitude=-1.28&longitude=36.81`
+- `POST /api/rescue/sos/dispatch/`
+- `GET /api/alerts/my/`
+
+### County officials endpoints
+
+- `GET /api/county/overview/`
+- `PATCH /api/risk/{id}/acknowledge/`
+- `GET /api/alerts/history/`
+- `GET /api/alerts/export/?county={county}&format=csv`
+- `GET /api/citizens/county-users/`
+- `GET /api/alerts/incidents/`
+- `PATCH /api/alerts/incidents/{id}/`
+- `GET /api/alerts/dispatch-log/`
+
+## Authentication and Access
+
+- NextAuth credentials provider on frontend
+- Django Simple JWT token exchange on backend
+- Authenticated route: `/dashboard/*` requires login
+- Authenticated route: `/county/*` requires login with `role === 'county_official'`
+- NextAuth auth fetches use request timeouts for faster failure when backend is down
+
+## Throughput Guidance (500+ Concurrent Users)
+
+- Django app instances: 2-3 (`gunicorn --workers 4 --threads 4`)
+- Celery workers: 2 nodes, concurrency 4-8
 - Postgres with connection pooling (PgBouncer recommended)
-- Redis single small instance (upgrade when queues grow)
-- CDN and edge caching for static frontend assets
-- Polling/SSE update interval: 60s to balance freshness and load
-
-For production:
-
-- Deploy frontend on Vercel, backend on Railway
-- Use Supabase Postgres + PostGIS
-- Use Redis Cloud for broker/backing queues
-- Enable Sentry DSNs for both frontend and backend
-- Add rate limits and API auth hardening at ingress
+- Redis instance sized by queue load
+- CDN + edge cache for static frontend assets
+- 60s polling/SSE intervals to balance freshness and load
 
 ## AI and Data Flow
 
-1. Celery Beat triggers `ingest_hazard_data_task` every 30 minutes.
-2. Task fetches KMD + NOAA feeds.
-3. Each normalized observation is analyzed by Gemini (`gemini-1.5-flash`).
-4. Resulted risk assessments are saved and alert dispatch tasks queued.
-5. SMS/WhatsApp dispatch runs asynchronously.
-6. Frontend consumes risks through REST and live SSE stream.
-
-## Accessibility
-
-- High contrast color system for low-visibility/outdoor use
-- Large risk states for sub-1-second visual recognition
-- Web Speech API support for audible critical alerts
-- Mobile-first controls with large tap targets, including double-confirm SOS
-
-## Authentication
-
-- Frontend session auth via NextAuth credentials provider
-- Token exchange handled server-side by NextAuth against Django Simple JWT
-- Protected SOS dispatch consumes session access token (`session.accessToken`)
+1. Celery Beat triggers ingestion.
+2. KMD + NOAA feeds are normalized.
+3. Gemini analyzes each observation.
+4. Risk assessments are persisted.
+5. Alert dispatch jobs are queued.
+6. Frontend consumes REST + live updates.
 
 ## Testing
 
-- Backend API + task tests:
-	- `docker compose exec backend python manage.py test apps.hazards apps.rescue`
-- Frontend mobile E2E tests:
-	- `cd frontend && npx playwright install --with-deps`
-	- `cd frontend && npm run test:e2e`
+Backend:
+- `docker compose exec backend python manage.py test apps.hazards apps.rescue`
+- `docker compose exec backend python manage.py test apps.alerts apps.hazards`
+
+Frontend:
+- `cd frontend && npx playwright install --with-deps`
+- `cd frontend && npm run test:e2e`
+
+Note: if your DB role lacks `CREATEDB`, Django test DB creation can fail.
 
 ## Security Notes
 
-- Keep all secrets in env files and cloud secret stores
-- Do not expose backend DB directly to frontend
-- Use HTTPS-only cookies/tokens in production
+- Keep secrets in env files and secret managers
+- Do not expose database directly to frontend
+- Use HTTPS-only token/cookie handling in production
 - Rotate API keys regularly
