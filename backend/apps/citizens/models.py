@@ -21,6 +21,19 @@ class CitizenProfile(models.Model):
         (CHANNEL_PUSH, 'Push Notification'),
     ]
 
+    RESPONDER_TYPE_FIRE = 'fire_station'
+    RESPONDER_TYPE_HOSPITAL = 'hospital'
+    RESPONDER_TYPE_POLICE = 'police_post'
+    RESPONDER_TYPE_REDCROSS = 'red_cross'
+    RESPONDER_TYPE_GENERAL = 'rescue_team'
+    RESPONDER_TYPE_CHOICES = [
+        (RESPONDER_TYPE_GENERAL, 'Rescue Team'),
+        (RESPONDER_TYPE_FIRE, 'Fire Station'),
+        (RESPONDER_TYPE_HOSPITAL, 'Hospital'),
+        (RESPONDER_TYPE_POLICE, 'Police Post'),
+        (RESPONDER_TYPE_REDCROSS, 'Red Cross'),
+    ]
+
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='citizen_profile')
     full_name = models.CharField(max_length=200)
     phone_number = models.CharField(max_length=20, unique=True)
@@ -30,6 +43,13 @@ class CitizenProfile(models.Model):
     preferred_language = models.CharField(max_length=10, default='en')
     location = models.PointField(geography=True, srid=4326)
     channels = models.JSONField(default=list)
+    responder_unit_type = models.CharField(
+        max_length=30,
+        choices=RESPONDER_TYPE_CHOICES,
+        default=RESPONDER_TYPE_GENERAL,
+    )
+    is_available_for_dispatch = models.BooleanField(default=True)
+    last_location_update = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

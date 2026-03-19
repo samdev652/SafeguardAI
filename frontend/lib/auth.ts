@@ -12,6 +12,48 @@ interface ProfileResponse {
   role?: AuthRole;
 }
 
+type JwtPayload = {
+  exp?: number;
+};
+
+function parseJwtExpiryMs(token?: string): number | undefined {
+  if (!token) return undefined;
+  const parts = token.split('.');
+  if (parts.length < 2) return undefined;
+  try {
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+    const payload = JSON.parse(Buffer.from(padded, 'base64').toString('utf8')) as JwtPayload;
+    if (!payload.exp) return undefined;
+    return payload.exp * 1000;
+  } catch {
+    return undefined;
+  }
+}
+
+async function refreshAccessToken(refreshToken?: string): Promise<{ accessToken?: string; refreshToken?: string; accessTokenExpiresAt?: number }> {
+  if (!refreshToken) return {};
+  try {
+    const response = await fetchWithTimeout(`${API_BASE_URL}/api/auth/token/refresh/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh: refreshToken }),
+    });
+    if (!response.ok) return {};
+
+    const data = (await response.json()) as { access?: string; refresh?: string };
+    const nextAccess = data.access;
+    const nextRefresh = data.refresh || refreshToken;
+    return {
+      accessToken: nextAccess,
+      refreshToken: nextRefresh,
+      accessTokenExpiresAt: parseJwtExpiryMs(nextAccess),
+    };
+  } catch {
+    return {};
+  }
+}
+
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = AUTH_REQUEST_TIMEOUT_MS) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -70,6 +112,7 @@ export const authOptions: NextAuthOptions = {
           email: credentials?.email,
           accessToken: data.access,
           refreshToken: data.refresh,
+          accessTokenExpiresAt: parseJwtExpiryMs(data.access),
           role,
           wardName,
         };
@@ -82,18 +125,33 @@ export const authOptions: NextAuthOptions = {
         const tokenUser = user as unknown as {
           accessToken?: string;
           refreshToken?: string;
+          accessTokenExpiresAt?: number;
           role?: AuthRole;
           wardName?: string;
         };
         token.accessToken = tokenUser.accessToken;
         token.refreshToken = tokenUser.refreshToken;
+        token.accessTokenExpiresAt = tokenUser.accessTokenExpiresAt;
         token.role = tokenUser.role;
         token.wardName = tokenUser.wardName;
       }
+
+      const expiresAt = Number(token.accessTokenExpiresAt || 0);
+      const shouldRefresh = Boolean(token.refreshToken) && (!expiresAt || Date.now() >= expiresAt - 30_000);
+      if (shouldRefresh) {
+        const refreshed = await refreshAccessToken(token.refreshToken as string | undefined);
+        if (refreshed.accessToken) {
+          token.accessToken = refreshed.accessToken;
+          token.refreshToken = refreshed.refreshToken || token.refreshToken;
+          token.accessTokenExpiresAt = refreshed.accessTokenExpiresAt;
+        }
+      }
+
       return token;
     },
     async session({ session, token }) {
       session.accessToken = token.accessToken as string;
+      session.accessTokenExpiresAt = token.accessTokenExpiresAt as number | undefined;
       session.role = (token.role as AuthRole) || 'citizen';
       session.wardName = (token.wardName as string) || 'Westlands';
       return session;

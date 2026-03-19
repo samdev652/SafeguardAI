@@ -2,7 +2,7 @@ from celery import shared_task
 from django.contrib.gis.geos import Point
 from django.utils import timezone
 from .models import HazardObservation, RiskAssessment
-from .services import GeminiRiskAnalyzer, fetch_kmd_data, fetch_noaa_data
+from .services import GeminiRiskAnalyzer, fetch_kmd_data, fetch_noaa_data, fetch_open_meteo_data
 from apps.alerts.tasks import dispatch_risk_alerts_task
 
 
@@ -31,7 +31,8 @@ def ingest_hazard_data_task() -> dict:
 
     kmd_items = _normalize_items(fetch_kmd_data(), 'kmd')
     noaa_items = _normalize_items(fetch_noaa_data(), 'noaa')
-    all_items = kmd_items + noaa_items
+    open_meteo_items = _normalize_items(fetch_open_meteo_data(), 'open_meteo')
+    all_items = kmd_items + noaa_items + open_meteo_items
 
     created = 0
     for item in all_items:

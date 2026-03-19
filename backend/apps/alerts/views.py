@@ -4,7 +4,10 @@ import random
 import csv
 import urllib.parse
 import urllib.request
+import urllib.error
+import json
 from datetime import datetime
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.gis.geos import Point
 from django.core.cache import cache
@@ -37,10 +40,25 @@ def normalize_kenya_phone(phone: str) -> str:
     return normalized
 
 
+def cleaned_env_value(name: str, default: str = '') -> str:
+    value = os.getenv(name, default)
+    if value is None:
+        return default
+    cleaned = str(value).strip()
+    # Allow copy-pasted quoted secrets in .env without breaking auth headers.
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {'"', "'"}:
+        cleaned = cleaned[1:-1].strip()
+    return cleaned
+
+
+def is_truthy(value: str) -> bool:
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 def send_sms_via_africas_talking(phone: str, message: str) -> dict:
-    username = os.getenv('AFRICASTALKING_USERNAME', 'sandbox')
-    api_key = os.getenv('AFRICASTALKING_API_KEY')
-    sender = os.getenv('AFRICASTALKING_SENDER_ID', '')
+    username = cleaned_env_value('AFRICASTALKING_USERNAME') or 'sandbox'
+    api_key = cleaned_env_value('AFRICASTALKING_API_KEY')
+    sender = cleaned_env_value('AFRICASTALKING_SENDER_ID')
     if not api_key:
         logger.warning('AFRICASTALKING_API_KEY missing; OTP is generated but SMS was not dispatched to provider.')
         return {'sent': False, 'provider': 'africas_talking', 'reason': 'missing_api_key'}
@@ -64,8 +82,63 @@ def send_sms_via_africas_talking(phone: str, message: str) -> dict:
             'apiKey': api_key,
         },
     )
-    with urllib.request.urlopen(request, timeout=8) as response:
-        body = response.read().decode('utf-8')
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            body = response.read().decode('utf-8')
+    except urllib.error.HTTPError as exc:
+        error_body = ''
+        if exc.fp is not None:
+            try:
+                error_body = exc.fp.read().decode('utf-8')
+            except Exception:
+                error_body = ''
+
+        if exc.code == 401:
+            reason = (
+                'Africa\'s Talking authentication failed. Confirm username/API key mode match '
+                '(sandbox vs live) and rotate the API key.'
+            )
+        else:
+            reason = f'Africa\'s Talking HTTP {exc.code}: {exc.reason}'
+
+        return {
+            'sent': False,
+            'provider': 'africas_talking',
+            'reason': reason,
+            'response': error_body,
+        }
+    except urllib.error.URLError as exc:
+        return {
+            'sent': False,
+            'provider': 'africas_talking',
+            'reason': f'Provider network error: {exc.reason}',
+        }
+
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        # If provider returned a non-JSON payload, surface raw response and mark as sent unknown.
+        return {'sent': True, 'provider': 'africas_talking', 'response': body}
+
+    recipients = parsed.get('SMSMessageData', {}).get('Recipients', []) if isinstance(parsed, dict) else []
+    if not recipients:
+        return {
+            'sent': False,
+            'provider': 'africas_talking',
+            'reason': 'No recipient status returned by provider.',
+            'response': body,
+        }
+
+    first_recipient = recipients[0]
+    status_text = str(first_recipient.get('status') or '').strip()
+    if not status_text.lower().startswith('success'):
+        return {
+            'sent': False,
+            'provider': 'africas_talking',
+            'reason': status_text or 'Provider did not accept the message.',
+            'response': body,
+        }
+
     return {'sent': True, 'provider': 'africas_talking', 'response': body}
 
 
@@ -86,6 +159,30 @@ class SendOtpView(APIView):
         except Exception as exc:  # pragma: no cover - provider/network failure should not crash UX.
             logger.exception('Failed sending OTP via Africa\'s Talking')
             provider = {'sent': False, 'provider': 'africas_talking', 'reason': str(exc)}
+
+        if not provider.get('sent'):
+            detail = provider.get('reason') or 'OTP provider could not deliver the message.'
+
+            fallback_enabled = is_truthy(cleaned_env_value('OTP_ALLOW_DEV_FALLBACK', 'False')) or settings.DEBUG
+            if fallback_enabled:
+                logger.warning('OTP provider failed; using fallback mode. reason=%s', detail)
+                return Response(
+                    {
+                        'detail': 'OTP generated using fallback mode.',
+                        'phone': phone,
+                        'provider': {
+                            'sent': True,
+                            'provider': 'debug_fallback',
+                            'reason': detail,
+                        },
+                        'dev_otp': otp,
+                    }
+                )
+
+            return Response(
+                {'detail': f'OTP dispatch failed: {detail}', 'phone': phone, 'provider': provider},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
         return Response({'detail': 'OTP sent.', 'phone': phone, 'provider': provider})
 

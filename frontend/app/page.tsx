@@ -4,7 +4,13 @@ import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { fetchCurrentRisks, fetchPublicRiskCount, fetchPublicStats } from '@/lib/api';
+import {
+  fetchCurrentRisks,
+  fetchPublicRiskCount,
+  fetchPublicStats,
+  fetchPublicWeatherConditions,
+  PublicWeatherCondition,
+} from '@/lib/api';
 import { RiskAssessment, RiskLevel } from '@/lib/types';
 
 const PublicMapPreview = dynamic(() => import('@/components/PublicMapPreview'), { ssr: false });
@@ -60,10 +66,15 @@ export default function PublicHomePage() {
   const [riskCount, setRiskCount] = useState(0);
   const [stats, setStats] = useState({ counties_covered: 0, alerts_sent_today: 0, prediction_accuracy: 0 });
   const [risks, setRisks] = useState<RiskAssessment[]>([]);
+  const [weatherConditions, setWeatherConditions] = useState<PublicWeatherCondition[]>([]);
   const [hazardFilter, setHazardFilter] = useState<HazardFilter>('all');
   const [stuck, setStuck] = useState(false);
-  const latestIdRef = useRef<number | null>(null);
+  const seenRiskIdsRef = useRef<Set<number>>(new Set());
+  const hasBootstrappedRef = useRef(false);
   const [freshIds, setFreshIds] = useState<number[]>([]);
+  const [popupAlerts, setPopupAlerts] = useState<RiskAssessment[]>([]);
+  const [signalEnabled, setSignalEnabled] = useState(true);
+  const audioContextRef = useRef<AudioContext | null>(null);
 
   useEffect(() => {
     const onScroll = () => setStuck(window.scrollY > 10);
@@ -71,14 +82,59 @@ export default function PublicHomePage() {
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
+  const emitAlertSignal = useCallback(() => {
+    if (typeof window === 'undefined' || !signalEnabled) return;
+
+    if ('vibrate' in navigator) {
+      navigator.vibrate([120, 70, 120]);
+    }
+
+    const AudioContextConstructor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextConstructor) {
+      return;
+    }
+
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContextConstructor();
+      }
+
+      const context = audioContextRef.current;
+      if (context.state === 'suspended') {
+        context.resume().catch(() => undefined);
+      }
+
+      const now = context.currentTime;
+      const oscillator = context.createOscillator();
+      const gainNode = context.createGain();
+
+      oscillator.type = 'triangle';
+      oscillator.frequency.setValueAtTime(880, now);
+      oscillator.frequency.linearRampToValueAtTime(1040, now + 0.14);
+
+      gainNode.gain.setValueAtTime(0.0001, now);
+      gainNode.gain.exponentialRampToValueAtTime(0.09, now + 0.03);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.24);
+
+      oscillator.connect(gainNode);
+      gainNode.connect(context.destination);
+      oscillator.start(now);
+      oscillator.stop(now + 0.24);
+    } catch {
+      // Keep feed working even when audio APIs are restricted.
+    }
+  }, [signalEnabled]);
+
   const refreshAll = useCallback(async () => {
-    const [countPayload, statsPayload, riskPayload] = await Promise.all([
+    const [countPayload, statsPayload, riskPayload, weatherPayload] = await Promise.all([
       fetchPublicRiskCount(),
       fetchPublicStats(),
       fetchCurrentRisks(),
+      fetchPublicWeatherConditions(8),
     ]);
     setRiskCount(countPayload.active_threat_count);
     setStats(statsPayload);
+    setWeatherConditions(weatherPayload);
 
     const sorted = [...riskPayload].sort((a, b) => {
       const bySeverity = severityRank[b.risk_level] - severityRank[a.risk_level];
@@ -86,18 +142,27 @@ export default function PublicHomePage() {
       return new Date(b.issued_at).getTime() - new Date(a.issued_at).getTime();
     });
 
-    if (sorted.length && latestIdRef.current && sorted[0].id !== latestIdRef.current) {
-      setFreshIds((prev) => [sorted[0].id, ...prev].slice(0, 8));
+    const seenRiskIds = seenRiskIdsRef.current;
+    const newRisks = sorted.filter((risk) => !seenRiskIds.has(risk.id));
+    sorted.forEach((risk) => seenRiskIds.add(risk.id));
+
+    if (newRisks.length) {
+      setFreshIds((prev) => [...newRisks.map((risk) => risk.id), ...prev].slice(0, 8));
+      if (hasBootstrappedRef.current) {
+        setPopupAlerts((prev) => [...newRisks.slice(0, 3), ...prev].slice(0, 4));
+        emitAlertSignal();
+      }
     }
-    if (sorted.length) latestIdRef.current = sorted[0].id;
+
+    hasBootstrappedRef.current = true;
     setRisks(sorted);
-  }, []);
+  }, [emitAlertSignal]);
 
   useEffect(() => {
     refreshAll().catch(() => undefined);
     const interval = window.setInterval(() => {
       refreshAll().catch(() => undefined);
-    }, 60000);
+    }, 20000);
     return () => window.clearInterval(interval);
   }, [refreshAll]);
 
@@ -106,6 +171,14 @@ export default function PublicHomePage() {
     const timeout = window.setTimeout(() => setFreshIds([]), 5500);
     return () => window.clearTimeout(timeout);
   }, [freshIds]);
+
+  useEffect(() => {
+    if (!popupAlerts.length) return;
+    const timeout = window.setTimeout(() => {
+      setPopupAlerts((prev) => prev.slice(1));
+    }, 4500);
+    return () => window.clearTimeout(timeout);
+  }, [popupAlerts]);
 
   const filteredRisks = useMemo(() => {
     return risks.filter((risk) => {
@@ -116,8 +189,48 @@ export default function PublicHomePage() {
 
   const topFour = filteredRisks.slice(0, 4);
 
+  const weatherTop = weatherConditions.slice(0, 6);
+
+  function dismissPopup(riskId: number) {
+    setPopupAlerts((prev) => prev.filter((risk) => risk.id !== riskId));
+  }
+
+  function formatMetric(value: number | null, suffix: string): string {
+    if (value === null || Number.isNaN(value)) return 'N/A';
+    return `${Math.round(value * 10) / 10}${suffix}`;
+  }
+
   return (
     <main className='public-root'>
+      <div className='public-alert-stack' aria-live='assertive'>
+        <AnimatePresence>
+          {popupAlerts.map((risk) => (
+            <motion.article
+              key={risk.id}
+              initial={{ opacity: 0, x: 24, y: -10 }}
+              animate={{ opacity: 1, x: 0, y: 0 }}
+              exit={{ opacity: 0, x: 28, y: -8 }}
+              transition={{ duration: 0.22 }}
+              className='public-alert-toast'
+            >
+              <strong>New {risk.hazard_type} alert</strong>
+              <p>
+                {risk.ward_name}
+                {risk.county_name ? `, ${risk.county_name}` : ''} - {risk.risk_level.toUpperCase()} severity.
+              </p>
+              <div className='public-alert-actions'>
+                <Link href={`/threats/${risk.id}`} className='public-alert-link'>
+                  View threat
+                </Link>
+                <button type='button' onClick={() => dismissPopup(risk.id)}>
+                  Dismiss
+                </button>
+              </div>
+            </motion.article>
+          ))}
+        </AnimatePresence>
+      </div>
+
       <header className={`public-nav ${stuck ? 'public-nav-stuck' : ''}`}>
         <div className='public-logo'>Safeguard AI</div>
         <nav className='public-nav-links'>
@@ -126,6 +239,14 @@ export default function PublicHomePage() {
           <a href='#for-counties'>For counties</a>
         </nav>
         <div className='public-nav-cta'>
+          <button
+            type='button'
+            className='public-alert-toggle'
+            onClick={() => setSignalEnabled((prev) => !prev)}
+            aria-pressed={signalEnabled}
+          >
+            Alert signal: {signalEnabled ? 'On' : 'Off'}
+          </button>
           <Link href='/signin' className='public-signin'>Sign in</Link>
           <Link href='/register' className='public-get-alerts'>Get alerts</Link>
         </div>
@@ -235,6 +356,39 @@ export default function PublicHomePage() {
         <Link href='/dashboard' className='map-preview-link' aria-label='Open live dashboard map'>
           <PublicMapPreview risks={risks} />
         </Link>
+      </section>
+
+      <section className='public-weather'>
+        <div className='section-head'>
+          <h2>Live Weather Conditions</h2>
+          <p>Area-specific weather factors affecting current calamity risk</p>
+        </div>
+        <div className='public-weather-grid'>
+          {weatherTop.map((item) => (
+            <article key={item.id} className='public-weather-card'>
+              <div className='public-weather-title'>
+                <h3>
+                  {item.ward_name}
+                  {item.county_name ? `, ${item.county_name}` : ''}
+                </h3>
+                <span>{item.hazard_type}</span>
+              </div>
+              <div className='public-weather-metrics'>
+                <span>Temp: {formatMetric(item.temperature_c, 'C')}</span>
+                <span>Rain: {formatMetric(item.precipitation_mm, 'mm')}</span>
+                <span>Wind: {formatMetric(item.wind_speed_kmh, 'km/h')}</span>
+              </div>
+              <p>{item.impact_summary}</p>
+              <small>Observed {formatAgo(item.observed_at)}</small>
+            </article>
+          ))}
+          {!weatherTop.length ? (
+            <article className='public-weather-card'>
+              <h3>Weather stream starting</h3>
+              <p>Current conditions will appear as soon as fresh observations are ingested.</p>
+            </article>
+          ) : null}
+        </div>
       </section>
 
       <section id='how-it-works' className='features-grid'>

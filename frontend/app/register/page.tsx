@@ -96,9 +96,20 @@ export default function RegisterPage() {
     try {
       const normalized = phoneWithKenyaPrefix(phone);
       const response = await sendRegistrationOtp(normalized);
+      if (!response.provider?.sent) {
+        throw new Error(
+          response.provider?.reason
+            ? `OTP not delivered: ${response.provider.reason}`
+            : 'OTP not delivered by provider.'
+        );
+      }
       setPhone(response.phone);
       setOtpSent(true);
-      setOtpMessage('OTP sent. Enter the 4-digit code to complete registration.');
+      if (response.provider.provider === 'debug_fallback' && response.dev_otp) {
+        setOtpMessage(`Provider unavailable. Dev OTP: ${response.dev_otp}`);
+      } else {
+        setOtpMessage('OTP sent. Enter the 4-digit code to complete registration.');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not send OTP');
     } finally {

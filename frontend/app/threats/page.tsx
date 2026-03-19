@@ -140,15 +140,32 @@ export default function ThreatsPage() {
 
   const lastUpdatedSeconds = Math.max(0, Math.floor((nowTick - lastUpdatedAt) / 1000));
 
-  async function ensureNearestUnits(risk: RiskAssessment) {
-    if (unitsByRiskId[risk.id]) return;
+  const refreshNearestUnits = useCallback(async (risk: RiskAssessment) => {
     try {
       const units = await fetchNearestRescueUnits(risk.latitude, risk.longitude);
       setUnitsByRiskId((prev) => ({ ...prev, [risk.id]: units.slice(0, 3) }));
     } catch {
       setUnitsByRiskId((prev) => ({ ...prev, [risk.id]: [] }));
     }
+  }, []);
+
+  async function ensureNearestUnits(risk: RiskAssessment) {
+    if (unitsByRiskId[risk.id]) return;
+    await refreshNearestUnits(risk);
   }
+
+  useEffect(() => {
+    if (!expandedRiskId) return;
+    const risk = risks.find((item) => item.id === expandedRiskId);
+    if (!risk) return;
+
+    refreshNearestUnits(risk).catch(() => undefined);
+    const interval = window.setInterval(() => {
+      refreshNearestUnits(risk).catch(() => undefined);
+    }, 20000);
+
+    return () => window.clearInterval(interval);
+  }, [expandedRiskId, refreshNearestUnits, risks]);
 
   async function copyShareLink(riskId: number) {
     const path = `/threats/${riskId}`;
@@ -333,11 +350,12 @@ export default function ThreatsPage() {
                         {nearest.length ? (
                           nearest.map((unit) => (
                             <li key={unit.id}>
-                              {unit.name}: {unit.phone_number}
+                              {unit.name}: {unit.phone_number} - {unit.is_live ? 'live now' : 'stale location'}
+                              {unit.distance_m !== null ? ` - ${Math.round(unit.distance_m)}m away` : ''}
                             </li>
                           ))
                         ) : (
-                          <li>No nearby units found yet.</li>
+                          <li>No active responders nearby right now.</li>
                         )}
                       </ul>
                       <p>

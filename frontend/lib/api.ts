@@ -1,4 +1,4 @@
-import { RiskAssessment, RescueUnit, WardHeatmapFeatureCollection } from './types';
+import { RiskAssessment, RescueUnit, RiskLevel, WardHeatmapFeatureCollection } from './types';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
@@ -34,6 +34,19 @@ export interface PublicStats {
   prediction_accuracy: number;
 }
 
+export interface PublicWeatherCondition {
+  id: number;
+  ward_name: string;
+  county_name: string | null;
+  hazard_type: string;
+  severity_index: number;
+  temperature_c: number | null;
+  precipitation_mm: number | null;
+  wind_speed_kmh: number | null;
+  observed_at: string;
+  impact_summary: string;
+}
+
 export async function fetchPublicRiskCount(): Promise<PublicRiskCount> {
   const response = await fetch(`${API_BASE_URL}/api/risk/count/`, { cache: 'no-store' });
   if (!response.ok) throw new Error('Failed to fetch public risk count');
@@ -43,6 +56,14 @@ export async function fetchPublicRiskCount(): Promise<PublicRiskCount> {
 export async function fetchPublicStats(): Promise<PublicStats> {
   const response = await fetch(`${API_BASE_URL}/api/stats/public/`, { cache: 'no-store' });
   if (!response.ok) throw new Error('Failed to fetch public stats');
+  return response.json();
+}
+
+export async function fetchPublicWeatherConditions(limit = 12): Promise<PublicWeatherCondition[]> {
+  const response = await fetch(`${API_BASE_URL}/api/risk/weather-conditions/?limit=${limit}`, {
+    cache: 'no-store',
+  });
+  if (!response.ok) throw new Error('Failed to fetch public weather conditions');
   return response.json();
 }
 
@@ -83,6 +104,29 @@ export async function fetchNearestRescueUnits(latitude: number, longitude: numbe
     { cache: 'no-store' }
   );
   if (!response.ok) throw new Error('Failed to fetch rescue units');
+  return response.json();
+}
+
+export interface RescueResponderHeartbeatPayload {
+  latitude: number;
+  longitude: number;
+  is_available_for_dispatch?: boolean;
+  unit_type?: string;
+}
+
+export async function updateRescueResponderHeartbeat(
+  token: string,
+  payload: RescueResponderHeartbeatPayload
+): Promise<RescueUnit> {
+  const response = await fetch(`${API_BASE_URL}/api/rescue/responders/heartbeat/`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error('Failed to update responder heartbeat');
   return response.json();
 }
 
@@ -210,6 +254,7 @@ export async function searchLocations(query: string): Promise<LocationSearchResu
 export interface OtpSendResponse {
   detail: string;
   phone: string;
+  dev_otp?: string;
   provider: {
     sent: boolean;
     provider: string;

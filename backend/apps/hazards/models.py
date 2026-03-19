@@ -4,7 +4,12 @@ from django.contrib.gis.db import models
 class HazardObservation(models.Model):
     SOURCE_KMD = 'kmd'
     SOURCE_NOAA = 'noaa'
-    SOURCE_CHOICES = [(SOURCE_KMD, 'KMD'), (SOURCE_NOAA, 'NOAA')]
+    SOURCE_OPEN_METEO = 'open_meteo'
+    SOURCE_CHOICES = [
+        (SOURCE_KMD, 'KMD'),
+        (SOURCE_NOAA, 'NOAA'),
+        (SOURCE_OPEN_METEO, 'Open-Meteo'),
+    ]
 
     source = models.CharField(max_length=20, choices=SOURCE_CHOICES)
     ward_name = models.CharField(max_length=120)

@@ -12,6 +12,7 @@ import {
   fetchDispatchQueue,
   fetchMyAlerts,
   fetchNearestRescueUnits,
+  updateRescueResponderHeartbeat,
   fetchWardHeatmap,
   PersonalAlert,
 } from '@/lib/api';
@@ -158,6 +159,55 @@ export default function DashboardPage() {
   }, [role, session?.accessToken]);
 
   useEffect(() => {
+    if (role !== 'rescue_team' || !session?.accessToken || typeof navigator === 'undefined' || !navigator.geolocation) {
+      return;
+    }
+
+    const token = session.accessToken as string;
+
+    const publishHeartbeat = async (coords: GeolocationCoordinates) => {
+      await updateRescueResponderHeartbeat(token, {
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        is_available_for_dispatch: true,
+      });
+    };
+
+    const onLocation = (position: GeolocationPosition) => {
+      publishHeartbeat(position.coords).catch(() => undefined);
+    };
+
+    const onLocationError = () => {
+      // If location is blocked, keep dashboard usable without crashing.
+    };
+
+    const watchId = navigator.geolocation.watchPosition(onLocation, onLocationError, {
+      enableHighAccuracy: true,
+      timeout: 12000,
+      maximumAge: 10000,
+    });
+
+    navigator.geolocation.getCurrentPosition(onLocation, onLocationError, {
+      enableHighAccuracy: true,
+      timeout: 12000,
+      maximumAge: 10000,
+    });
+
+    const pulse = window.setInterval(() => {
+      navigator.geolocation.getCurrentPosition(onLocation, onLocationError, {
+        enableHighAccuracy: true,
+        timeout: 12000,
+        maximumAge: 10000,
+      });
+    }, 20000);
+
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+      window.clearInterval(pulse);
+    };
+  }, [role, session?.accessToken]);
+
+  useEffect(() => {
     if (role !== 'citizen' || !session?.accessToken) {
       setPersonalAlerts([]);
       return;
@@ -214,18 +264,35 @@ export default function DashboardPage() {
     return { totalAlertsSent, affectedPopulation, responseRate };
   }, [risks]);
 
+  const refreshNearestUnits = useCallback(async (risk: RiskAssessment) => {
+    try {
+      const units = await fetchNearestRescueUnits(risk.latitude, risk.longitude);
+      setUnitsByRiskId((prev) => ({ ...prev, [risk.id]: units.slice(0, 3) }));
+    } catch {
+      setUnitsByRiskId((prev) => ({ ...prev, [risk.id]: [] }));
+    }
+  }, []);
+
   const ensureRescueUnits = useCallback(
     async (risk: RiskAssessment) => {
       if (unitsByRiskId[risk.id]) return;
-      try {
-        const units = await fetchNearestRescueUnits(risk.latitude, risk.longitude);
-        setUnitsByRiskId((prev) => ({ ...prev, [risk.id]: units.slice(0, 3) }));
-      } catch {
-        setUnitsByRiskId((prev) => ({ ...prev, [risk.id]: [] }));
-      }
+      await refreshNearestUnits(risk);
     },
-    [unitsByRiskId]
+    [refreshNearestUnits, unitsByRiskId]
   );
+
+  useEffect(() => {
+    if (!expandedRiskId) return;
+    const risk = risks.find((item) => item.id === expandedRiskId);
+    if (!risk) return;
+
+    refreshNearestUnits(risk).catch(() => undefined);
+    const interval = window.setInterval(() => {
+      refreshNearestUnits(risk).catch(() => undefined);
+    }, 20000);
+
+    return () => window.clearInterval(interval);
+  }, [expandedRiskId, refreshNearestUnits, risks]);
 
   const toggleExpanded = useCallback(
     (risk: RiskAssessment) => {
@@ -516,12 +583,14 @@ export default function DashboardPage() {
                           <ul className='units-list'>
                             {units.map((unit) => (
                               <li key={unit.id}>
-                                {unit.name} ({unit.unit_type.replace('_', ' ')}) - {Math.round(unit.distance_m)}m away
+                                {unit.name} ({unit.unit_type.replace('_', ' ')}) - {unit.phone_number} -{' '}
+                                {unit.distance_m !== null ? `${Math.round(unit.distance_m)}m away` : 'distance unavailable'} -{' '}
+                                {unit.is_live ? 'live now' : 'stale location'}
                               </li>
                             ))}
                           </ul>
                         ) : (
-                          <p className='units-loading'>Fetching nearest 3 units...</p>
+                          <p className='units-loading'>No active responders nearby right now.</p>
                         )}
                       </div>
                     </div>

@@ -23,9 +23,11 @@ export interface RescueUnit {
   phone_number: string;
   county: string;
   ward_name: string;
-  distance_m: number;
+  distance_m: number | null;
   latitude: number;
   longitude: number;
+  is_live?: boolean;
+  last_location_update?: string | null;
 }
 
 export interface WardHeatmapFeature {

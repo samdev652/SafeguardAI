@@ -138,6 +138,8 @@ KMD_API_URL = os.getenv('KMD_API_URL', '')
 KMD_API_KEY = os.getenv('KMD_API_KEY', '')
 NOAA_API_URL = os.getenv('NOAA_API_URL', '')
 NOAA_API_KEY = os.getenv('NOAA_API_KEY', '')
+OPEN_METEO_API_URL = os.getenv('OPEN_METEO_API_URL', 'https://api.open-meteo.com/v1/forecast')
+OPEN_METEO_POINTS = os.getenv('OPEN_METEO_POINTS', '')
 
 AFRICASTALKING_USERNAME = os.getenv('AFRICASTALKING_USERNAME', '')
 AFRICASTALKING_API_KEY = os.getenv('AFRICASTALKING_API_KEY', '')

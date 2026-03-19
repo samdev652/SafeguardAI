@@ -45,15 +45,57 @@ class WardHeatmapApiTests(APITestCase):
         self.assertEqual(feature['properties']['risk_level'], 'critical')
 
 
+class PublicWeatherConditionsApiTests(APITestCase):
+    def setUp(self):
+        polygon = Polygon(
+            ((36.77, -1.24), (36.83, -1.24), (36.83, -1.29), (36.77, -1.29), (36.77, -1.24)),
+            srid=4326,
+        )
+        WardBoundary.objects.create(
+            ward_name='Westlands',
+            county_name='Nairobi',
+            geometry=MultiPolygon(polygon),
+        )
+        HazardObservation.objects.create(
+            source='open_meteo',
+            ward_name='Westlands',
+            village_name='Kangemi',
+            hazard_type='flood',
+            severity_index=82,
+            raw_payload={
+                'properties': {
+                    'temperature_2m': 27.4,
+                    'precipitation': 15.2,
+                    'wind_speed_10m': 21.6,
+                }
+            },
+            location=Point(36.80, -1.26, srid=4326),
+            observed_at=timezone.now(),
+        )
+
+    def test_weather_conditions_returns_area_weather_and_impact(self):
+        response = self.client.get('/api/risk/weather-conditions/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 1)
+        item = response.data[0]
+        self.assertEqual(item['ward_name'], 'Westlands')
+        self.assertEqual(item['county_name'], 'Nairobi')
+        self.assertEqual(item['hazard_type'], 'flood')
+        self.assertEqual(item['precipitation_mm'], 15.2)
+        self.assertIn('flood', item['impact_summary'].lower())
+
+
 class IngestionTaskTests(TestCase):
     @patch('apps.hazards.tasks.dispatch_risk_alerts_task.delay')
     @patch('apps.hazards.tasks.GeminiRiskAnalyzer.analyze')
+    @patch('apps.hazards.tasks.fetch_open_meteo_data')
     @patch('apps.hazards.tasks.fetch_noaa_data')
     @patch('apps.hazards.tasks.fetch_kmd_data')
     def test_ingestion_creates_observations_and_risks(
         self,
         mock_kmd,
         mock_noaa,
+        mock_open_meteo,
         mock_analyze,
         mock_dispatch,
     ):
@@ -67,6 +109,7 @@ class IngestionTaskTests(TestCase):
             }
         ]
         mock_noaa.return_value = []
+        mock_open_meteo.return_value = []
         mock_analyze.return_value = {
             'risk_level': 'critical',
             'risk_score': 88,
@@ -80,6 +123,47 @@ class IngestionTaskTests(TestCase):
         self.assertEqual(result['created_observations'], 1)
         self.assertEqual(HazardObservation.objects.count(), 1)
         self.assertEqual(RiskAssessment.objects.count(), 1)
+        mock_dispatch.assert_called_once()
+
+    @patch('apps.hazards.tasks.dispatch_risk_alerts_task.delay')
+    @patch('apps.hazards.tasks.GeminiRiskAnalyzer.analyze')
+    @patch('apps.hazards.tasks.fetch_open_meteo_data')
+    @patch('apps.hazards.tasks.fetch_noaa_data')
+    @patch('apps.hazards.tasks.fetch_kmd_data')
+    def test_ingestion_uses_open_meteo_fallback_when_primary_feeds_empty(
+        self,
+        mock_kmd,
+        mock_noaa,
+        mock_open_meteo,
+        mock_analyze,
+        mock_dispatch,
+    ):
+        mock_kmd.return_value = []
+        mock_noaa.return_value = []
+        mock_open_meteo.return_value = [
+            {
+                'properties': {
+                    'area': 'Nairobi',
+                    'hazard_type': 'flood',
+                    'severity_index': 72,
+                },
+                'geometry': {'coordinates': [36.817223, -1.286389]},
+            }
+        ]
+        mock_analyze.return_value = {
+            'risk_level': 'high',
+            'risk_score': 72,
+            'guidance_en': 'Avoid flood-prone roads.',
+            'guidance_sw': 'Epuka barabara zenye mafuriko.',
+            'summary': 'High flood risk',
+        }
+
+        result = ingest_hazard_data_task()
+
+        self.assertEqual(result['created_observations'], 1)
+        observation = HazardObservation.objects.get()
+        self.assertEqual(observation.source, 'open_meteo')
+        self.assertEqual(observation.ward_name, 'Nairobi')
         mock_dispatch.assert_called_once()
 
 

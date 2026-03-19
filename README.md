@@ -183,7 +183,7 @@ Notes:
 ## AI and Data Flow
 
 1. Celery Beat triggers ingestion.
-2. KMD + NOAA feeds are normalized.
+2. KMD + NOAA feeds are normalized, with Open-Meteo fallback for Kenya coverage.
 3. Gemini analyzes each observation.
 4. Risk assessments are persisted.
 5. Alert dispatch jobs are queued.

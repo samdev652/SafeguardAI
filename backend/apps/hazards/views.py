@@ -13,7 +13,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from apps.alerts.models import Alert
 from apps.citizens.models import CitizenProfile
-from .models import RiskAssessment, WardBoundary
+from .models import HazardObservation, RiskAssessment, WardBoundary
 from .serializers import RiskAssessmentSerializer
 from .tasks import ingest_hazard_data_task
 
@@ -83,6 +83,104 @@ class PublicRiskCountView(APIView):
     def get(self, _request):
         active_count = RiskAssessment.objects.exclude(risk_level=RiskAssessment.RISK_SAFE).count()
         return Response({'active_threat_count': active_count})
+
+
+def _safe_float(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _weather_impact_summary(hazard_type: str, severity_index: float, precipitation_mm, wind_kmh, temperature_c):
+    normalized_hazard = (hazard_type or 'hazard').lower()
+
+    if precipitation_mm is not None and precipitation_mm >= 12:
+        return 'Heavy rainfall is increasing flood pressure in this area.'
+    if wind_kmh is not None and wind_kmh >= 45:
+        return 'Strong winds can affect travel safety and temporary structures.'
+    if temperature_c is not None and temperature_c >= 34:
+        return 'High heat conditions may increase drought and dehydration risk.'
+    if 'flood' in normalized_hazard:
+        return 'Flood-prone zones should prepare for sudden water level rise.'
+    if 'landslide' in normalized_hazard:
+        return 'Slope instability risk is elevated around steep terrain.'
+    if 'drought' in normalized_hazard:
+        return 'Dry conditions can reduce water availability and crop resilience.'
+    if severity_index >= 75:
+        return 'Severe weather signals are active and require close monitoring.'
+    return 'Weather conditions should be monitored for fast local changes.'
+
+
+class PublicWeatherConditionsView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        limit_param = request.query_params.get('limit')
+        try:
+            limit = int(limit_param) if limit_param is not None else 12
+        except ValueError as exc:
+            raise ValidationError({'detail': 'limit must be an integer value.'}) from exc
+
+        limit = max(1, min(limit, 40))
+
+        ward_to_county = {
+            ward.ward_name.lower(): ward.county_name
+            for ward in WardBoundary.objects.only('ward_name', 'county_name')
+        }
+
+        latest_by_area = []
+        seen_areas = set()
+        recent = HazardObservation.objects.order_by('-observed_at')[:400]
+        for observation in recent:
+            area_key = observation.ward_name.strip().lower()
+            if area_key in seen_areas:
+                continue
+            seen_areas.add(area_key)
+            latest_by_area.append(observation)
+            if len(latest_by_area) >= limit:
+                break
+
+        payload = []
+        for observation in latest_by_area:
+            raw_payload = observation.raw_payload if isinstance(observation.raw_payload, dict) else {}
+            properties = raw_payload.get('properties', raw_payload)
+
+            temperature_c = _safe_float(
+                properties.get('temperature_2m', properties.get('temperature_c', properties.get('temperature')))
+            )
+            precipitation_mm = _safe_float(
+                properties.get('precipitation', properties.get('precipitation_mm', properties.get('rainfall_mm')))
+            )
+            wind_kmh = _safe_float(
+                properties.get('wind_speed_10m', properties.get('wind_speed_kmh', properties.get('wind_speed')))
+            )
+
+            county_name = ward_to_county.get(observation.ward_name.lower())
+            payload.append(
+                {
+                    'id': observation.id,
+                    'ward_name': observation.ward_name,
+                    'county_name': county_name,
+                    'hazard_type': observation.hazard_type,
+                    'severity_index': observation.severity_index,
+                    'temperature_c': temperature_c,
+                    'precipitation_mm': precipitation_mm,
+                    'wind_speed_kmh': wind_kmh,
+                    'observed_at': observation.observed_at.isoformat(),
+                    'impact_summary': _weather_impact_summary(
+                        observation.hazard_type,
+                        observation.severity_index,
+                        precipitation_mm,
+                        wind_kmh,
+                        temperature_c,
+                    ),
+                }
+            )
+
+        return Response(payload)
 
 
 class PublicStatsView(APIView):
