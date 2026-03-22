@@ -16,8 +16,50 @@ import {
   updateRescueResponderHeartbeat,
   fetchWardHeatmap,
   PersonalAlert,
+  riskEventsUrl,
 } from '@/lib/api';
+  // Real-time SSE subscription for calamities
+  useEffect(() => {
+    const url = riskEventsUrl();
+    const eventSource = new EventSource(url);
+    eventSource.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        // Only update if the ward matches or no ward filter is set
+        if (!ward || payload.ward_name?.toLowerCase() === ward.toLowerCase()) {
+          setRisks((prev) => {
+            // Replace or add the new risk by id
+            const idx = prev.findIndex((r) => r.id === payload.id);
+            if (idx !== -1) {
+              const updated = [...prev];
+              updated[idx] = payload;
+              return updated;
+            }
+            return [payload, ...prev].slice(0, 100);
+          });
+        }
+      } catch (e) {
+        // Ignore parse errors
+      }
+    };
+    eventSource.onerror = () => {
+      // Optionally handle errors or reconnect
+    };
+    return () => {
+      eventSource.close();
+    };
+  }, [ward]);
+
 import { RescueUnit, RiskAssessment, RiskLevel, WardHeatmapFeatureCollection } from '@/lib/types';
+import ForecastCard, { DayForecast } from '@/components/ForecastCard';
+// Fetch 7-day forecast for a ward
+async function fetchForecast(ward: string): Promise<DayForecast[]> {
+  const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+  const query = ward ? `?ward=${encodeURIComponent(ward)}` : '';
+  const response = await fetch(`${API_BASE_URL}/api/risk/forecast/${query}`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Failed to fetch forecast');
+  return response.json();
+}
 
 const RiskMap = dynamic(() => import('@/components/RiskMap'), { ssr: false });
 
@@ -92,6 +134,29 @@ function probabilityWidth(score: number): string {
 }
 
 export default function DashboardPage() {
+    // Forecast state
+    const [forecast, setForecast] = useState<DayForecast[] | null>(null);
+    const [forecastError, setForecastError] = useState<string | null>(null);
+    const [forecastLoading, setForecastLoading] = useState(false);
+    // Fetch forecast when ward changes
+    useEffect(() => {
+      let ignore = false;
+      setForecastLoading(true);
+      setForecastError(null);
+      fetchForecast(ward)
+        .then((data) => {
+          if (!ignore) setForecast(data);
+        })
+        .catch((err) => {
+          if (!ignore) setForecastError('Could not load forecast');
+        })
+        .finally(() => {
+          if (!ignore) setForecastLoading(false);
+        });
+      return () => {
+        ignore = true;
+      };
+    }, [ward]);
   const { data: session, status } = useSession();
   const router = useRouter();
   const role: UserRole = (session?.role as UserRole) || 'citizen';
@@ -444,6 +509,16 @@ export default function DashboardPage() {
       </div>
 
       <header className='top-nav'>
+              {/* Forecast card at the top, below nav */}
+              <div style={{ maxWidth: 900, margin: '0 auto', width: '100%' }}>
+                {forecastLoading ? (
+                  <div style={{ padding: 16, textAlign: 'center', color: '#aaa' }}>Loading 7-day risk forecast...</div>
+                ) : forecastError ? (
+                  <div style={{ padding: 16, textAlign: 'center', color: '#ef4444' }}>{forecastError}</div>
+                ) : forecast && forecast.length ? (
+                  <ForecastCard forecast={forecast} />
+                ) : null}
+              </div>
         <div className='top-nav-logo'>
           <span className='top-nav-logo-mark'>SG</span>
           <span>Safeguard AI</span>
