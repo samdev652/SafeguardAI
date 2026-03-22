@@ -12,3 +12,4 @@ sentry-sdk==2.13.0
 geopy==2.4.1
 gunicorn==22.0.0
 whitenoise==6.7.0
+django-redis

@@ -7,15 +7,47 @@ from django.conf import settings
 class GeminiRiskAnalyzer:
     _ALLOWED_LEVELS = {'safe', 'medium', 'high', 'critical'}
 
+
     def analyze(self, observation: dict) -> dict:
+        import logging
         if not settings.GEMINI_API_KEY:
             return self._fallback(observation)
 
-        prompt = (
-            'You are a disaster risk analyst for Kenya. Return JSON only with keys '
-            'risk_level, risk_score, guidance_en, guidance_sw, summary. '
-            f'Input data: {json.dumps(observation)}'
+        # --- 1. Scientific rainfall and soil moisture thresholds ---
+        hazard_thresholds = {
+            'flood': 'Flood risk: precipitation > 18mm in 24h or soil moisture > 0.38 m3/m3',
+            'landslide': 'Landslide risk: precipitation > 12mm in 24h and soil moisture > 0.32 m3/m3 on slopes',
+            'drought': 'Drought risk: soil moisture < 0.18 m3/m3 and rainfall < 2mm in 7 days',
+            'earthquake': 'Earthquake risk: only above medium in seismic counties (e.g. Rift Valley); never high/critical elsewhere',
+        }
+        hazard_type = observation.get('hazard_type', '').lower()
+        threshold_text = hazard_thresholds.get(hazard_type, '')
+
+        # --- 2. Add current month and Kenya's seasonal rainfall context ---
+        from datetime import datetime
+        month = datetime.now().strftime('%B')
+        kenya_seasons = (
+            'Kenya rainfall context: March-May (long rains), Oct-Dec (short rains), Jan-Feb/Jun-Sep (dry). '
+            'Compare current month to normal rainfall for this area.'
         )
+
+        # --- 3. Hard rules section ---
+        hard_rules = (
+            '\nHARD RULES:\n'
+            '- Never return high or critical risk without citing a specific number from the weather data.\n'
+            '- Never invent data values.\n'
+            '- Never predict earthquake risk above medium for non-seismic Kenyan counties.\n'
+            '- If weather data is missing, return low risk and note missing data, do not guess.'
+        )
+
+        prompt = (
+            f'You are a disaster risk analyst for Kenya. It is {month}. {kenya_seasons}\n'
+            f'{threshold_text}\n'
+            'Return JSON only with keys risk_level, risk_score, guidance_en, guidance_sw, summary, confidence.\n'
+            f'Input data: {json.dumps(observation)}\n'
+            f'{hard_rules}'
+        )
+
         url = (
             f'https://generativelanguage.googleapis.com/v1beta/models/'
             f'{settings.GEMINI_MODEL}:generateContent?key={settings.GEMINI_API_KEY}'
@@ -30,8 +62,25 @@ class GeminiRiskAnalyzer:
             response.raise_for_status()
             text = response.json()['candidates'][0]['content']['parts'][0]['text']
             parsed = self._parse_structured_response(text)
+            # --- 4. Confidence threshold check ---
+            confidence = parsed.get('confidence')
+            try:
+                confidence = float(confidence)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            orig_level = parsed.get('risk_level', '').lower()
+            downgrade_map = {'critical': 'high', 'high': 'medium', 'medium': 'safe', 'safe': 'safe'}
+            if confidence < 0.65:
+                logging.warning(f"Gemini assessment discarded (confidence={confidence:.2f}): {parsed}")
+                return self._fallback(observation)
+            elif confidence < 0.75:
+                downgraded = downgrade_map.get(orig_level, 'safe')
+                if downgraded != orig_level:
+                    logging.info(f"Gemini assessment downgraded from {orig_level} to {downgraded} (confidence={confidence:.2f}): {parsed}")
+                    parsed['risk_level'] = downgraded
             return self._normalize_analysis(parsed, observation)
-        except Exception:
+        except Exception as e:
+            logging.error(f"Gemini analysis error: {e}")
             return self._fallback(observation)
 
     def _parse_structured_response(self, text: str) -> dict:
@@ -99,6 +148,40 @@ class GeminiRiskAnalyzer:
             'guidance_sw': 'Nenda sehemu ya juu na uwe na nambari za dharura tayari.',
             'summary': f'{observation.get("hazard_type", "hazard").title()} risk is {risk_level}.',
         }
+
+
+    def chat(self, messages, language='en'):
+        """
+        messages: list of {role: 'system'|'user'|'assistant', content: str}
+        language: 'en' or 'sw'
+        """
+        import requests
+        import json
+        from django.conf import settings
+        prompt_parts = []
+        for m in messages:
+            if m['role'] == 'system':
+                prompt_parts.append(f"[SYSTEM]\n{m['content']}")
+            elif m['role'] == 'user':
+                prompt_parts.append(f"[USER]\n{m['content']}")
+            elif m['role'] == 'assistant':
+                prompt_parts.append(f"[ASSISTANT]\n{m['content']}")
+        prompt = '\n'.join(prompt_parts)
+        url = (
+            f'https://generativelanguage.googleapis.com/v1beta/models/'
+            f'{settings.GEMINI_MODEL}:generateContent?key={settings.GEMINI_API_KEY}'
+        )
+        payload = {
+            'contents': [{'parts': [{'text': prompt}]}],
+            'generationConfig': {'responseMimeType': 'text/plain'},
+        }
+        try:
+            response = requests.post(url, json=payload, timeout=30)
+            response.raise_for_status()
+            text = response.json()['candidates'][0]['content']['parts'][0]['text']
+            return text.strip()
+        except Exception as e:
+            return 'Sorry, I could not process your request at this time.'
 
 
 def fetch_kmd_data() -> list[dict]:
