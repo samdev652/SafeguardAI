@@ -6,6 +6,7 @@ from .views import (
     WardRiskView,
     risk_events_stream,
 )
+from .api_forecast import SevenDayRiskForecastView
 
 urlpatterns = [
     path('risks/', LatestRiskAssessmentsView.as_view(), name='risk-list'),
@@ -13,4 +14,5 @@ urlpatterns = [
     path('risks/ward-heatmap/', WardHeatmapGeoJSONView.as_view(), name='ward-heatmap-geojson'),
     path('risks/events/', risk_events_stream, name='risk-events-stream'),
     path('ingest/trigger/', TriggerIngestionView.as_view(), name='ingest-trigger'),
+    path('forecast/', SevenDayRiskForecastView.as_view(), name='seven-day-forecast'),
 ]

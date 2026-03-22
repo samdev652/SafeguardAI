@@ -377,3 +377,69 @@ class CommunityVerificationWebhookTests(TestCase):
         self.assertEqual(self.risk.risk_level, RiskAssessment.RISK_SAFE)
         self.assertIsNotNone(self.risk.community_all_clear_at)
         self.assertTrue(any('ALL-CLEAR' in call.args[1] for call in mock_send_sms.call_args_list))
+
+    @patch('apps.alerts.views.AlertDispatcher.send_sms')
+    def test_no_replies_do_not_override_verified_status(self, mock_send_sms):
+        mock_send_sms.return_value = {'sent': True, 'provider': 'africas_talking', 'response': {}}
+
+        yes_citizens = []
+        for idx in range(3):
+            user = User.objects.create(username=f'verified-yes-user-{idx}')
+            citizen = CitizenProfile.objects.create(
+                user=user,
+                full_name=f'Verified Yes Citizen {idx}',
+                phone_number=f'+2547330001{idx}',
+                ward_name='Westlands',
+                village_name='Kangemi',
+                preferred_language='en',
+                location=Point(36.80, -1.26, srid=4326),
+                channels=['sms'],
+            )
+            yes_citizens.append(citizen)
+            CommunityVerificationPrompt.objects.create(
+                risk_assessment=self.risk,
+                citizen=citizen,
+                phone_number=citizen.phone_number,
+                prompt_message='Reply YES if conditions are dangerous, NO if all clear.',
+            )
+
+        for idx, citizen in enumerate(yes_citizens):
+            response = self.client.post(
+                '/api/alerts/sms/reply/webhook/',
+                {'from': citizen.phone_number, 'text': 'YES'},
+                content_type='application/json',
+            )
+            self.assertEqual(response.status_code, 200)
+
+        self.risk.refresh_from_db()
+        self.assertEqual(self.risk.community_status, RiskAssessment.COMMUNITY_VERIFIED)
+        self.assertEqual(self.risk.risk_level, RiskAssessment.RISK_HIGH)
+
+        for idx in range(5):
+            user = User.objects.create(username=f'late-no-user-{idx}')
+            citizen = CitizenProfile.objects.create(
+                user=user,
+                full_name=f'Late No Citizen {idx}',
+                phone_number=f'+2547442001{idx}',
+                ward_name='Westlands',
+                village_name='Kangemi',
+                preferred_language='en',
+                location=Point(36.80, -1.26, srid=4326),
+                channels=['sms'],
+            )
+            CommunityVerificationPrompt.objects.create(
+                risk_assessment=self.risk,
+                citizen=citizen,
+                phone_number=citizen.phone_number,
+                prompt_message='Reply YES if conditions are dangerous, NO if all clear.',
+            )
+            response = self.client.post(
+                '/api/alerts/sms/reply/webhook/',
+                {'from': citizen.phone_number, 'text': 'NO'},
+                content_type='application/json',
+            )
+            self.assertEqual(response.status_code, 200)
+
+        self.risk.refresh_from_db()
+        self.assertEqual(self.risk.community_status, RiskAssessment.COMMUNITY_VERIFIED)
+        self.assertEqual(self.risk.risk_level, RiskAssessment.RISK_HIGH)

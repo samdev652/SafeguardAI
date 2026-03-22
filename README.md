@@ -155,6 +155,7 @@ Notes:
 - `GET /api/rescue/units/nearest/?latitude=-1.28&longitude=36.81`
 - `POST /api/rescue/sos/dispatch/`
 - `GET /api/alerts/my/`
+- `POST /api/alerts/sms/reply/webhook/` (Africa's Talking inbound SMS callback)
 
 ### County officials endpoints
 
@@ -245,3 +246,24 @@ Behavior implemented:
 - OTP expires after 5 minutes.
 - Phone must verify OTP before subscription.
 - Alert dispatch sends emergency guidance and nearest rescue contacts over selected channels (`sms`, `whatsapp`, `push`).
+
+## Community Verification by SMS Reply
+
+When a risk assessment is `high` or `critical`, the backend now sends a second ward-wide SMS prompt after the main alert:
+
+- Prompt text asks citizens to reply `YES` (disaster visible) or `NO` (normal conditions).
+- `3` YES replies mark the assessment as community verified and trigger a ward-wide confirmation SMS.
+- `5` NO replies downgrade the assessment to safe, mark all-clear, and trigger a ward-wide all-clear SMS.
+
+Webhook endpoint used by Africa's Talking:
+
+- `POST /api/alerts/sms/reply/webhook/`
+
+Dashboard setup (Africa's Talking):
+
+1. Open your SMS product in the Africa's Talking dashboard.
+2. Set callback URL to your public backend URL plus `/api/alerts/sms/reply/webhook/`.
+3. Example production callback URL: `https://api.your-domain.com/api/alerts/sms/reply/webhook/`
+4. Save and test by sending an SMS reply containing `YES` or `NO`.
+
+Note: localhost callbacks are not reachable by Africa's Talking. Use a public HTTPS URL (for example via your cloud deployment or an HTTPS tunnel) when testing inbound replies.

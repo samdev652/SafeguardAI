@@ -7,6 +7,7 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.gis.geos import Point
 from django.core.cache import cache
+from django.db import transaction
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import generics, permissions, status
@@ -171,65 +172,76 @@ class SmsReplyWebhookView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
+        import logging
+        logger = logging.getLogger(__name__)
+
         raw_phone = str(request.data.get('from') or request.data.get('phoneNumber') or '').strip()
         raw_text = str(request.data.get('text') or '').strip()
+        logger.info('Webhook received: data=%r', request.data)
         if not raw_phone or not raw_text:
+            logger.warning('Webhook rejected: missing phone or text. data=%r', request.data)
             return Response({'detail': 'ignored'}, status=status.HTTP_200_OK)
+
 
         try:
             phone = normalize_kenya_phone(raw_phone)
-        except ValidationError:
+        except ValidationError as e:
+            logger.warning('Webhook rejected: invalid phone format (%r). data=%r', raw_phone, request.data)
             return Response({'detail': 'ignored'}, status=status.HTTP_200_OK)
+
 
         vote = raw_text.split()[0].strip().lower()
         if vote not in {CommunityVerificationPrompt.VOTE_YES, CommunityVerificationPrompt.VOTE_NO}:
+            logger.warning('Webhook rejected: invalid vote (%r). data=%r', vote, request.data)
             return Response({'detail': 'ignored'}, status=status.HTTP_200_OK)
 
-        prompt = (
-            CommunityVerificationPrompt.objects.select_related('risk_assessment')
-            .filter(phone_number=phone, vote='')
-            .order_by('-prompted_at')
-            .first()
-        )
-        if not prompt:
-            return Response({'detail': 'ignored'}, status=status.HTTP_200_OK)
 
-        prompt.vote = vote
-        prompt.raw_reply = raw_text
-        prompt.replied_at = timezone.now()
-        prompt.save(update_fields=['vote', 'raw_reply', 'replied_at'])
+        outbound_message = ''
+        with transaction.atomic():
+            prompt = (
+                CommunityVerificationPrompt.objects.select_related('risk_assessment')
+                .select_for_update()
+                .filter(phone_number=phone, vote='')
+                .order_by('-prompted_at')
+                .first()
+            )
+            if not prompt:
+                logger.warning('Webhook rejected: no pending prompt for phone=%r. data=%r', phone, request.data)
+                return Response({'detail': 'ignored'}, status=status.HTTP_200_OK)
 
-        risk = prompt.risk_assessment
-        prompts = CommunityVerificationPrompt.objects.filter(risk_assessment=risk)
-        yes_count = prompts.filter(vote=CommunityVerificationPrompt.VOTE_YES).count()
-        no_count = prompts.filter(vote=CommunityVerificationPrompt.VOTE_NO).count()
+            prompt.vote = vote
+            prompt.raw_reply = raw_text
+            prompt.replied_at = timezone.now()
+            prompt.save(update_fields=['vote', 'raw_reply', 'replied_at'])
 
-        if yes_count >= COMMUNITY_YES_THRESHOLD and risk.community_status == RiskAssessment.COMMUNITY_PENDING:
-            risk.community_status = RiskAssessment.COMMUNITY_VERIFIED
-            risk.community_verified_at = timezone.now()
-            risk.save(update_fields=['community_status', 'community_verified_at'])
-            self._broadcast_ward_sms(
-                risk,
-                (
+            risk = RiskAssessment.objects.select_for_update().get(id=prompt.risk_assessment_id)
+            prompts = CommunityVerificationPrompt.objects.filter(risk_assessment=risk)
+            yes_count = prompts.filter(vote=CommunityVerificationPrompt.VOTE_YES).count()
+            no_count = prompts.filter(vote=CommunityVerificationPrompt.VOTE_NO).count()
+
+            if yes_count >= COMMUNITY_YES_THRESHOLD and risk.community_status == RiskAssessment.COMMUNITY_PENDING:
+                risk.community_status = RiskAssessment.COMMUNITY_VERIFIED
+                risk.community_verified_at = timezone.now()
+                risk.save(update_fields=['community_status', 'community_verified_at'])
+                outbound_message = (
                     f'[Safeguard CONFIRMED] {risk.hazard_type.title()} risk in {risk.ward_name} '
                     'has been community verified. Follow official guidance and stay safe.'
-                ),
-            )
-        elif no_count >= COMMUNITY_NO_THRESHOLD and risk.community_status != RiskAssessment.COMMUNITY_ALL_CLEAR:
-            risk.risk_level = RiskAssessment.RISK_SAFE
-            risk.community_status = RiskAssessment.COMMUNITY_ALL_CLEAR
-            risk.community_all_clear_at = timezone.now()
-            risk.summary = f'Community all-clear reported for {risk.hazard_type} in {risk.ward_name}.'
-            risk.save(
-                update_fields=['risk_level', 'community_status', 'community_all_clear_at', 'summary']
-            )
-            self._broadcast_ward_sms(
-                risk,
-                (
+                )
+            elif no_count >= COMMUNITY_NO_THRESHOLD and risk.community_status == RiskAssessment.COMMUNITY_PENDING:
+                risk.risk_level = RiskAssessment.RISK_SAFE
+                risk.community_status = RiskAssessment.COMMUNITY_ALL_CLEAR
+                risk.community_all_clear_at = timezone.now()
+                risk.summary = f'Community all-clear reported for {risk.hazard_type} in {risk.ward_name}.'
+                risk.save(
+                    update_fields=['risk_level', 'community_status', 'community_all_clear_at', 'summary']
+                )
+                outbound_message = (
                     f'[Safeguard ALL-CLEAR] Community reports indicate normal conditions in {risk.ward_name}. '
                     'Risk has been downgraded. Continue normal activity and monitor updates.'
-                ),
-            )
+                )
+
+        if outbound_message:
+            self._broadcast_ward_sms(risk, outbound_message)
 
         return Response({'detail': 'ok'}, status=status.HTTP_200_OK)
 
