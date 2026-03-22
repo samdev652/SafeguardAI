@@ -72,18 +72,32 @@ export const authOptions: NextAuthOptions = {
       credentials: {
         email: { label: 'Email', type: 'email' },
         password: { label: 'Password', type: 'password' },
+        phone: { label: 'Phone', type: 'text' },
+        otp: { label: 'OTP', type: 'text' },
       },
       async authorize(credentials) {
+        const phone = String(credentials?.phone || '').trim();
+        const otp = String(credentials?.otp || '').trim();
+        const isPhoneOtpMode = Boolean(phone && otp);
+
         let response: Response;
         try {
-          response = await fetchWithTimeout(`${API_BASE_URL}/api/auth/token/`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              username: credentials?.email,
-              password: credentials?.password,
-            }),
-          });
+          if (isPhoneOtpMode) {
+            response = await fetchWithTimeout(`${API_BASE_URL}/api/alerts/otp/login/`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ phone, otp }),
+            });
+          } else {
+            response = await fetchWithTimeout(`${API_BASE_URL}/api/auth/token/`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                username: credentials?.email,
+                password: credentials?.password,
+              }),
+            });
+          }
         } catch {
           return null;
         }
@@ -108,8 +122,8 @@ export const authOptions: NextAuthOptions = {
         }
 
         return {
-          id: credentials?.email || 'user',
-          email: credentials?.email,
+          id: isPhoneOtpMode ? phone : credentials?.email || 'user',
+          email: credentials?.email || phone,
           accessToken: data.access,
           refreshToken: data.refresh,
           accessTokenExpiresAt: parseJwtExpiryMs(data.access),

@@ -1,6 +1,8 @@
 import json
 import time
+import requests
 from datetime import timedelta
+from django.conf import settings
 from django.db.models import Avg, Count
 from django.db.models.functions import TruncDate
 from django.utils import timezone
@@ -114,6 +116,29 @@ def _weather_impact_summary(hazard_type: str, severity_index: float, precipitati
     return 'Weather conditions should be monitored for fast local changes.'
 
 
+def _fetch_live_weather_snapshot(latitude: float, longitude: float) -> tuple[float | None, float | None, float | None]:
+    base_url = getattr(settings, 'OPEN_METEO_API_URL', '') or 'https://api.open-meteo.com/v1/forecast'
+    params = {
+        'latitude': latitude,
+        'longitude': longitude,
+        'current': 'temperature_2m,precipitation,wind_speed_10m',
+        'timezone': 'Africa/Nairobi',
+    }
+
+    try:
+        response = requests.get(base_url, params=params, timeout=8)
+        response.raise_for_status()
+        payload = response.json()
+        current = payload.get('current', {}) if isinstance(payload, dict) else {}
+        return (
+            _safe_float(current.get('temperature_2m')),
+            _safe_float(current.get('precipitation')),
+            _safe_float(current.get('wind_speed_10m')),
+        )
+    except Exception:
+        return (None, None, None)
+
+
 class PublicWeatherConditionsView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -157,6 +182,15 @@ class PublicWeatherConditionsView(APIView):
             wind_kmh = _safe_float(
                 properties.get('wind_speed_10m', properties.get('wind_speed_kmh', properties.get('wind_speed')))
             )
+
+            if temperature_c is None or precipitation_mm is None or wind_kmh is None:
+                live_temp, live_rain, live_wind = _fetch_live_weather_snapshot(
+                    observation.location.y,
+                    observation.location.x,
+                )
+                temperature_c = temperature_c if temperature_c is not None else live_temp
+                precipitation_mm = precipitation_mm if precipitation_mm is not None else live_rain
+                wind_kmh = wind_kmh if wind_kmh is not None else live_wind
 
             county_name = ward_to_county.get(observation.ward_name.lower())
             payload.append(

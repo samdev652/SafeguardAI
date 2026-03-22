@@ -261,7 +261,7 @@ export default function PublicHomePage() {
         </p>
         <div className='hero-cta'>
           <Link href='/register' className='hero-primary'>Get free alerts</Link>
-          <Link href='/dashboard' className='hero-secondary'>View live map</Link>
+          <Link href='/threats' className='hero-secondary'>View live map</Link>
         </div>
         <div className='hero-stats'>
           <article>
@@ -351,9 +351,9 @@ export default function PublicHomePage() {
       <section className='public-map-preview'>
         <div className='section-head'>
           <h2>Map Preview</h2>
-          <p>Click to open full live dashboard</p>
+          <p>Click to open full public live map</p>
         </div>
-        <Link href='/dashboard' className='map-preview-link' aria-label='Open live dashboard map'>
+        <Link href='/threats' className='map-preview-link' aria-label='Open public live map'>
           <PublicMapPreview risks={risks} />
         </Link>
       </section>

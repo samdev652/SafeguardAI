@@ -254,6 +254,7 @@ export async function searchLocations(query: string): Promise<LocationSearchResu
 export interface OtpSendResponse {
   detail: string;
   phone: string;
+  channel?: 'sms' | 'whatsapp';
   dev_otp?: string;
   provider: {
     sent: boolean;
@@ -263,17 +264,18 @@ export interface OtpSendResponse {
   };
 }
 
-export async function sendRegistrationOtp(phone: string): Promise<OtpSendResponse> {
+export async function sendRegistrationOtp(phone: string, channel: 'sms' | 'whatsapp' = 'sms'): Promise<OtpSendResponse> {
   const response = await fetch(`${API_BASE_URL}/api/alerts/otp/send/`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ phone }),
+    body: JSON.stringify({ phone, channel }),
   });
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
-    const message = (data && (data.detail || data.phone?.[0])) || 'Could not send OTP';
+    const phoneError = Array.isArray(data?.phone) ? data.phone[0] : data?.phone;
+    const message = (data && (data.detail || phoneError)) || 'Could not send OTP';
     throw new Error(String(message));
   }
   return response.json();

@@ -7,14 +7,18 @@ from .views import (
     IncidentReportListView,
     IncidentReportUpdateView,
     MyAlertsView,
+    OtpPhoneLoginView,
     SendOtpView,
     VerifyOtpView,
+    SmsReplyWebhookView,
 )
 
 urlpatterns = [
     path('my/', MyAlertsView.as_view(), name='my-alerts'),
     path('otp/send/', SendOtpView.as_view(), name='alerts-otp-send'),
     path('otp/verify/', VerifyOtpView.as_view(), name='alerts-otp-verify'),
+    path('otp/login/', OtpPhoneLoginView.as_view(), name='alerts-otp-login'),
+    path('sms/reply/webhook/', SmsReplyWebhookView.as_view(), name='sms-reply-webhook'),
     path('subscribe/', AlertSubscribeView.as_view(), name='alerts-subscribe'),
     path('history/', CountyAlertHistoryView.as_view(), name='county-alert-history'),
     path('export/', CountyAlertExportView.as_view(), name='county-alert-export'),

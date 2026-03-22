@@ -38,6 +38,15 @@ class RiskAssessment(models.Model):
         (RISK_CRITICAL, 'Critical'),
     ]
 
+    COMMUNITY_PENDING = 'pending'
+    COMMUNITY_VERIFIED = 'verified'
+    COMMUNITY_ALL_CLEAR = 'all_clear'
+    COMMUNITY_STATUS_CHOICES = [
+        (COMMUNITY_PENDING, 'Pending'),
+        (COMMUNITY_VERIFIED, 'Verified'),
+        (COMMUNITY_ALL_CLEAR, 'All Clear'),
+    ]
+
     ward_name = models.CharField(max_length=120)
     village_name = models.CharField(max_length=120, blank=True)
     hazard_type = models.CharField(max_length=40)
@@ -47,6 +56,9 @@ class RiskAssessment(models.Model):
     guidance_sw = models.TextField()
     summary = models.TextField()
     location = models.PointField(geography=True, srid=4326)
+    community_status = models.CharField(max_length=20, choices=COMMUNITY_STATUS_CHOICES, default=COMMUNITY_PENDING)
+    community_verified_at = models.DateTimeField(null=True, blank=True)
+    community_all_clear_at = models.DateTimeField(null=True, blank=True)
     issued_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -2,24 +2,24 @@ import logging
 import os
 import random
 import csv
-import urllib.parse
-import urllib.request
-import urllib.error
-import json
 from datetime import datetime
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.gis.geos import Point
 from django.core.cache import cache
 from django.http import HttpResponse
+from django.utils import timezone
 from rest_framework import generics, permissions, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
 from apps.citizens.models import CitizenProfile
 from apps.hazards.models import RiskAssessment, WardBoundary
-from .models import Alert, IncidentReport, RescueRequest
+from apps.rescue.services import find_nearest_rescue_units
+from .models import Alert, CommunityVerificationPrompt, IncidentReport, RescueRequest
+from .services import AlertDispatcher
 from .serializers import AlertSerializer, CountyAlertHistorySerializer, IncidentReportSerializer
 
 
@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 
 OTP_TTL_SECONDS = 300
 OTP_VERIFIED_TTL_SECONDS = 600
+OTP_CHANNEL_SMS = 'sms'
+OTP_CHANNEL_WHATSAPP = 'whatsapp'
+COMMUNITY_YES_THRESHOLD = 3
+COMMUNITY_NO_THRESHOLD = 5
 
 
 def normalize_kenya_phone(phone: str) -> str:
@@ -35,8 +39,12 @@ def normalize_kenya_phone(phone: str) -> str:
         normalized = f'+254{normalized[1:]}'
     elif normalized.startswith('254'):
         normalized = f'+{normalized}'
-    if not normalized.startswith('+254') or len(''.join(ch for ch in normalized if ch.isdigit())) != 12:
-        raise ValidationError({'phone': 'Use a valid Kenya phone number in +2547XXXXXXXX format.'})
+
+    digits = ''.join(ch for ch in normalized if ch.isdigit())
+    has_valid_length = len(digits) == 12
+    has_valid_prefix = digits.startswith('2547') or digits.startswith('2541')
+    if not normalized.startswith('+254') or not has_valid_length or not has_valid_prefix:
+        raise ValidationError({'phone': 'Use a valid Kenya mobile number in +2547XXXXXXXX or +2541XXXXXXXX format.'})
     return normalized
 
 
@@ -55,110 +63,31 @@ def is_truthy(value: str) -> bool:
     return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
-def send_sms_via_africas_talking(phone: str, message: str) -> dict:
-    username = cleaned_env_value('AFRICASTALKING_USERNAME') or 'sandbox'
-    api_key = cleaned_env_value('AFRICASTALKING_API_KEY')
-    sender = cleaned_env_value('AFRICASTALKING_SENDER_ID')
-    if not api_key:
-        logger.warning('AFRICASTALKING_API_KEY missing; OTP is generated but SMS was not dispatched to provider.')
-        return {'sent': False, 'provider': 'africas_talking', 'reason': 'missing_api_key'}
-
-    payload = {
-        'username': username,
-        'to': phone,
-        'message': message,
-    }
-    if sender:
-        payload['from'] = sender
-
-    data = urllib.parse.urlencode(payload).encode('utf-8')
-    request = urllib.request.Request(
-        url='https://api.africastalking.com/version1/messaging',
-        data=data,
-        method='POST',
-        headers={
-            'Accept': 'application/json',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'apiKey': api_key,
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            body = response.read().decode('utf-8')
-    except urllib.error.HTTPError as exc:
-        error_body = ''
-        if exc.fp is not None:
-            try:
-                error_body = exc.fp.read().decode('utf-8')
-            except Exception:
-                error_body = ''
-
-        if exc.code == 401:
-            reason = (
-                'Africa\'s Talking authentication failed. Confirm username/API key mode match '
-                '(sandbox vs live) and rotate the API key.'
-            )
-        else:
-            reason = f'Africa\'s Talking HTTP {exc.code}: {exc.reason}'
-
-        return {
-            'sent': False,
-            'provider': 'africas_talking',
-            'reason': reason,
-            'response': error_body,
-        }
-    except urllib.error.URLError as exc:
-        return {
-            'sent': False,
-            'provider': 'africas_talking',
-            'reason': f'Provider network error: {exc.reason}',
-        }
-
-    try:
-        parsed = json.loads(body)
-    except json.JSONDecodeError:
-        # If provider returned a non-JSON payload, surface raw response and mark as sent unknown.
-        return {'sent': True, 'provider': 'africas_talking', 'response': body}
-
-    recipients = parsed.get('SMSMessageData', {}).get('Recipients', []) if isinstance(parsed, dict) else []
-    if not recipients:
-        return {
-            'sent': False,
-            'provider': 'africas_talking',
-            'reason': 'No recipient status returned by provider.',
-            'response': body,
-        }
-
-    first_recipient = recipients[0]
-    status_text = str(first_recipient.get('status') or '').strip()
-    if not status_text.lower().startswith('success'):
-        return {
-            'sent': False,
-            'provider': 'africas_talking',
-            'reason': status_text or 'Provider did not accept the message.',
-            'response': body,
-        }
-
-    return {'sent': True, 'provider': 'africas_talking', 'response': body}
-
-
 class SendOtpView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
         raw_phone = str(request.data.get('phone', '')).strip()
+        channel = str(request.data.get('channel', OTP_CHANNEL_SMS)).strip().lower()
+        if channel not in {OTP_CHANNEL_SMS, OTP_CHANNEL_WHATSAPP}:
+            raise ValidationError({'channel': 'Choose sms or whatsapp.'})
+
         phone = normalize_kenya_phone(raw_phone)
         otp = f'{random.randint(1000, 9999)}'
         cache.set(f'otp:{phone}', otp, timeout=OTP_TTL_SECONDS)
         cache.delete(f'otp:verified:{phone}')
 
-        message = f'Safeguard AI code: {otp}. Expires in 5 minutes.'
-        provider = {'sent': False, 'provider': 'africas_talking', 'reason': 'unattempted'}
+        message = f'[Safeguard OTP] Verification code: {otp}. Expires in 5 minutes. Do not share this code.'
+        provider = {'sent': False, 'provider': 'unknown', 'reason': 'unattempted'}
+        dispatcher = AlertDispatcher()
         try:
-            provider = send_sms_via_africas_talking(phone, message)
+            if channel == OTP_CHANNEL_WHATSAPP:
+                provider = dispatcher.send_whatsapp(phone, message)
+            else:
+                provider = dispatcher.send_sms(phone, message, purpose='otp')
         except Exception as exc:  # pragma: no cover - provider/network failure should not crash UX.
-            logger.exception('Failed sending OTP via Africa\'s Talking')
-            provider = {'sent': False, 'provider': 'africas_talking', 'reason': str(exc)}
+            logger.exception('Failed sending OTP via provider')
+            provider = {'sent': False, 'provider': channel, 'reason': str(exc)}
 
         if not provider.get('sent'):
             detail = provider.get('reason') or 'OTP provider could not deliver the message.'
@@ -170,6 +99,7 @@ class SendOtpView(APIView):
                     {
                         'detail': 'OTP generated using fallback mode.',
                         'phone': phone,
+                        'channel': channel,
                         'provider': {
                             'sent': True,
                             'provider': 'debug_fallback',
@@ -180,11 +110,11 @@ class SendOtpView(APIView):
                 )
 
             return Response(
-                {'detail': f'OTP dispatch failed: {detail}', 'phone': phone, 'provider': provider},
+                {'detail': f'OTP dispatch failed: {detail}', 'phone': phone, 'channel': channel, 'provider': provider},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        return Response({'detail': 'OTP sent.', 'phone': phone, 'provider': provider})
+        return Response({'detail': 'OTP sent.', 'phone': phone, 'channel': channel, 'provider': provider})
 
 
 class VerifyOtpView(APIView):
@@ -204,6 +134,113 @@ class VerifyOtpView(APIView):
         cache.set(f'otp:verified:{phone}', True, timeout=OTP_VERIFIED_TTL_SECONDS)
         cache.delete(f'otp:{phone}')
         return Response({'verified': True})
+
+
+class OtpPhoneLoginView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        raw_phone = str(request.data.get('phone', '')).strip()
+        phone = normalize_kenya_phone(raw_phone)
+        otp = str(request.data.get('otp', '')).strip()
+        if len(otp) != 4 or not otp.isdigit():
+            raise ValidationError({'otp': 'Enter the 4-digit OTP.'})
+
+        cached_otp = cache.get(f'otp:{phone}')
+        if cached_otp != otp:
+            return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        profile = CitizenProfile.objects.filter(phone_number=phone).select_related('user').first()
+        if not profile:
+            return Response({'detail': 'No subscription found for this phone number.'}, status=status.HTTP_404_NOT_FOUND)
+
+        refresh = RefreshToken.for_user(profile.user)
+        cache.delete(f'otp:{phone}')
+        cache.delete(f'otp:verified:{phone}')
+        return Response(
+            {
+                'access': str(refresh.access_token),
+                'refresh': str(refresh),
+                'role': profile.role,
+                'ward_name': profile.ward_name,
+            }
+        )
+
+
+class SmsReplyWebhookView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        raw_phone = str(request.data.get('from') or request.data.get('phoneNumber') or '').strip()
+        raw_text = str(request.data.get('text') or '').strip()
+        if not raw_phone or not raw_text:
+            return Response({'detail': 'ignored'}, status=status.HTTP_200_OK)
+
+        try:
+            phone = normalize_kenya_phone(raw_phone)
+        except ValidationError:
+            return Response({'detail': 'ignored'}, status=status.HTTP_200_OK)
+
+        vote = raw_text.split()[0].strip().lower()
+        if vote not in {CommunityVerificationPrompt.VOTE_YES, CommunityVerificationPrompt.VOTE_NO}:
+            return Response({'detail': 'ignored'}, status=status.HTTP_200_OK)
+
+        prompt = (
+            CommunityVerificationPrompt.objects.select_related('risk_assessment')
+            .filter(phone_number=phone, vote='')
+            .order_by('-prompted_at')
+            .first()
+        )
+        if not prompt:
+            return Response({'detail': 'ignored'}, status=status.HTTP_200_OK)
+
+        prompt.vote = vote
+        prompt.raw_reply = raw_text
+        prompt.replied_at = timezone.now()
+        prompt.save(update_fields=['vote', 'raw_reply', 'replied_at'])
+
+        risk = prompt.risk_assessment
+        prompts = CommunityVerificationPrompt.objects.filter(risk_assessment=risk)
+        yes_count = prompts.filter(vote=CommunityVerificationPrompt.VOTE_YES).count()
+        no_count = prompts.filter(vote=CommunityVerificationPrompt.VOTE_NO).count()
+
+        if yes_count >= COMMUNITY_YES_THRESHOLD and risk.community_status == RiskAssessment.COMMUNITY_PENDING:
+            risk.community_status = RiskAssessment.COMMUNITY_VERIFIED
+            risk.community_verified_at = timezone.now()
+            risk.save(update_fields=['community_status', 'community_verified_at'])
+            self._broadcast_ward_sms(
+                risk,
+                (
+                    f'[Safeguard CONFIRMED] {risk.hazard_type.title()} risk in {risk.ward_name} '
+                    'has been community verified. Follow official guidance and stay safe.'
+                ),
+            )
+        elif no_count >= COMMUNITY_NO_THRESHOLD and risk.community_status != RiskAssessment.COMMUNITY_ALL_CLEAR:
+            risk.risk_level = RiskAssessment.RISK_SAFE
+            risk.community_status = RiskAssessment.COMMUNITY_ALL_CLEAR
+            risk.community_all_clear_at = timezone.now()
+            risk.summary = f'Community all-clear reported for {risk.hazard_type} in {risk.ward_name}.'
+            risk.save(
+                update_fields=['risk_level', 'community_status', 'community_all_clear_at', 'summary']
+            )
+            self._broadcast_ward_sms(
+                risk,
+                (
+                    f'[Safeguard ALL-CLEAR] Community reports indicate normal conditions in {risk.ward_name}. '
+                    'Risk has been downgraded. Continue normal activity and monitor updates.'
+                ),
+            )
+
+        return Response({'detail': 'ok'}, status=status.HTTP_200_OK)
+
+    def _broadcast_ward_sms(self, risk: RiskAssessment, message: str) -> None:
+        dispatcher = AlertDispatcher()
+        citizens = CitizenProfile.objects.filter(ward_name__iexact=risk.ward_name).only('phone_number')
+        for citizen in citizens:
+            try:
+                dispatcher.send_sms(citizen.phone_number, message, purpose='alert')
+            except Exception:
+                logger.exception('Failed broadcasting community status SMS')
 
 
 class AlertSubscribeView(APIView):
@@ -264,6 +301,44 @@ class AlertSubscribeView(APIView):
 
         latest_risk = RiskAssessment.objects.filter(ward_name__iexact=ward.ward_name).order_by('-issued_at').first()
         risk_level = latest_risk.risk_level if latest_risk else 'safe'
+
+        if CitizenProfile.CHANNEL_SMS in profile.channels:
+            contacts = []
+            try:
+                nearest_units = list(find_nearest_rescue_units(centroid.x, centroid.y))
+                for unit in nearest_units[:3]:
+                    unit_type = str(unit.responder_unit_type or 'rescue_team').replace('_', ' ')
+                    contacts.append(f'{unit.full_name} ({unit_type}) {unit.phone_number}')
+            except Exception:
+                contacts = []
+
+            contacts_line = (
+                'Nearest rescue contacts: ' + '; '.join(contacts)
+                if contacts
+                else 'Nearest rescue contacts: call county emergency center.'
+            )
+
+            if latest_risk:
+                guidance = latest_risk.guidance_sw if profile.preferred_language == 'sw' else latest_risk.guidance_en
+                sms_message = (
+                    f'[Safeguard ALERT] Subscription active for {ward.ward_name}.\n'
+                    f'Current risk: {latest_risk.hazard_type} ({latest_risk.risk_level.upper()}).\n'
+                    f'What to do: {guidance}\n'
+                    f'{contacts_line}'
+                )
+            else:
+                sms_message = (
+                    f'[Safeguard ALERT] Subscription active for {ward.ward_name}.\n'
+                    'Current risk: SAFE.\n'
+                    'What to do: Keep your phone reachable for urgent alerts.\n'
+                    f'{contacts_line}'
+                )
+
+            try:
+                AlertDispatcher().send_sms(phone, sms_message, purpose='alert')
+            except Exception:
+                logger.exception('Failed sending subscription briefing SMS')
+
         cache.delete(f'otp:verified:{phone}')
 
         return Response(

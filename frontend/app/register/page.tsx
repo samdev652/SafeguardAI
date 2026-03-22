@@ -37,6 +37,11 @@ function phoneWithKenyaPrefix(input: string): string {
   return `+254${digits.slice(0, 9)}`;
 }
 
+function isValidKenyaPhone(input: string): boolean {
+  const digits = input.replace(/\D/g, '');
+  return digits.length === 12 && (digits.startsWith('2547') || digits.startsWith('2541'));
+}
+
 function riskClass(level: RiskLevel): string {
   if (level === 'critical') return 'register-risk-critical';
   if (level === 'high') return 'register-risk-high';
@@ -90,12 +95,18 @@ export default function RegisterPage() {
   }
 
   async function sendOtp() {
+    const normalized = phoneWithKenyaPrefix(phone);
+    if (!isValidKenyaPhone(normalized)) {
+      setError('Enter a valid Kenya mobile number in +2547XXXXXXXX or +2541XXXXXXXX format.');
+      setOtpMessage(null);
+      return;
+    }
+
     setBusy(true);
     setError(null);
     setOtpMessage(null);
     try {
-      const normalized = phoneWithKenyaPrefix(phone);
-      const response = await sendRegistrationOtp(normalized);
+      const response = await sendRegistrationOtp(normalized, 'sms');
       if (!response.provider?.sent) {
         throw new Error(
           response.provider?.reason
@@ -108,7 +119,7 @@ export default function RegisterPage() {
       if (response.provider.provider === 'debug_fallback' && response.dev_otp) {
         setOtpMessage(`Provider unavailable. Dev OTP: ${response.dev_otp}`);
       } else {
-        setOtpMessage('OTP sent. Enter the 4-digit code to complete registration.');
+        setOtpMessage('OTP sent via SMS. Enter the code to complete registration.');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not send OTP');
@@ -303,8 +314,23 @@ export default function RegisterPage() {
                       className='register-input'
                       value={phone}
                       onChange={(event) => setPhone(phoneWithKenyaPrefix(event.target.value))}
-                      placeholder='+2547XXXXXXXX'
+                      placeholder='+2547XXXXXXXX or +2541XXXXXXXX'
                     />
+
+                    <div className='register-channel-grid'>
+                      <button
+                        type='button'
+                        className='register-channel-card register-channel-active'
+                        disabled
+                      >
+                        <div>
+                          <strong>OTP via SMS</strong>
+                          <span>Africa&apos;s Talking sandbox</span>
+                        </div>
+                        <span className='register-toggle'>ON</span>
+                      </button>
+                    </div>
+                    <p className='register-help-error'>WhatsApp OTP is temporarily disabled. Please use SMS OTP.</p>
 
                     <div className='register-otp-row'>
                       <button type='button' className='register-secondary' onClick={sendOtp} disabled={busy}>
@@ -317,9 +343,13 @@ export default function RegisterPage() {
                         maxLength={4}
                         value={otp}
                         onChange={(event) => setOtp(event.target.value.replace(/\D/g, '').slice(0, 4))}
-                        placeholder='4-digit OTP'
+                        placeholder='OTP code'
                       />
                     </div>
+
+                    {!isValidKenyaPhone(phone) ? (
+                      <p className='register-help-error'>Enter a valid Kenya mobile number in +2547XXXXXXXX or +2541XXXXXXXX format.</p>
+                    ) : null}
 
                     {otpMessage ? <p className='register-help-success'>{otpMessage}</p> : null}
                     {error ? <p className='register-help-error'>{error}</p> : null}
@@ -357,9 +387,12 @@ export default function RegisterPage() {
               Alerts are active for <strong>{success.ward}</strong>. Current risk level is{' '}
               <span className={`register-risk-pill ${riskClass(success.risk)}`}>{success.risk.toUpperCase()}</span>
             </p>
+            <p>
+              You are subscribed with phone OTP. No email/password is required for this alert subscription flow.
+            </p>
             <div className='register-success-actions'>
-              <Link href='/dashboard' className='register-primary'>
-                View live dashboard
+              <Link href='/threats' className='register-primary'>
+                View live threats
               </Link>
               <Link href='/download' className='register-secondary'>
                 Download mobile app

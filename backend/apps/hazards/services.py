@@ -1,9 +1,12 @@
 import json
+import re
 import requests
 from django.conf import settings
 
 
 class GeminiRiskAnalyzer:
+    _ALLOWED_LEVELS = {'safe', 'medium', 'high', 'critical'}
+
     def analyze(self, observation: dict) -> dict:
         if not settings.GEMINI_API_KEY:
             return self._fallback(observation)
@@ -17,15 +20,66 @@ class GeminiRiskAnalyzer:
             f'https://generativelanguage.googleapis.com/v1beta/models/'
             f'{settings.GEMINI_MODEL}:generateContent?key={settings.GEMINI_API_KEY}'
         )
-        payload = {'contents': [{'parts': [{'text': prompt}]}]}
+        payload = {
+            'contents': [{'parts': [{'text': prompt}]}],
+            'generationConfig': {'responseMimeType': 'application/json'},
+        }
 
         try:
             response = requests.post(url, json=payload, timeout=20)
             response.raise_for_status()
             text = response.json()['candidates'][0]['content']['parts'][0]['text']
-            return json.loads(text)
+            parsed = self._parse_structured_response(text)
+            return self._normalize_analysis(parsed, observation)
         except Exception:
             return self._fallback(observation)
+
+    def _parse_structured_response(self, text: str) -> dict:
+        raw = str(text or '').strip()
+        if not raw:
+            raise ValueError('Empty model response')
+
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+        # Handle model responses that include fenced JSON.
+        match = re.search(r'\{[\s\S]*\}', raw)
+        if not match:
+            raise ValueError('No JSON object found in model response')
+        parsed = json.loads(match.group(0))
+        if not isinstance(parsed, dict):
+            raise ValueError('Model response JSON is not an object')
+        return parsed
+
+    def _normalize_analysis(self, parsed: dict, observation: dict) -> dict:
+        severity = float(observation.get('severity_index', 0) or 0)
+
+        risk_level = str(parsed.get('risk_level', '')).strip().lower()
+        if risk_level not in self._ALLOWED_LEVELS:
+            risk_level = self._fallback(observation)['risk_level']
+
+        risk_score = parsed.get('risk_score', severity)
+        try:
+            risk_score = max(0.0, min(100.0, float(risk_score)))
+        except (TypeError, ValueError):
+            risk_score = severity
+
+        guidance_en = str(parsed.get('guidance_en') or '').strip()
+        guidance_sw = str(parsed.get('guidance_sw') or '').strip()
+        summary = str(parsed.get('summary') or '').strip()
+
+        fallback = self._fallback(observation)
+        return {
+            'risk_level': risk_level,
+            'risk_score': risk_score,
+            'guidance_en': guidance_en or fallback['guidance_en'],
+            'guidance_sw': guidance_sw or fallback['guidance_sw'],
+            'summary': summary or fallback['summary'],
+        }
 
     def _fallback(self, observation: dict) -> dict:
         severity = float(observation.get('severity_index', 0))

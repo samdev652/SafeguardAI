@@ -146,6 +146,10 @@ Notes:
 - `POST /api/alerts/otp/verify/`
 - `POST /api/alerts/subscribe/`
 
+`POST /api/alerts/otp/send/` accepts:
+- `phone`: Kenya number, e.g. `+2547XXXXXXXX`
+- `channel`: `sms` or `whatsapp` (default `sms`)
+
 ### Operational endpoints
 
 - `GET /api/rescue/units/nearest/?latitude=-1.28&longitude=36.81`
@@ -207,3 +211,37 @@ Note: if your DB role lacks `CREATEDB`, Django test DB creation can fail.
 - Do not expose database directly to frontend
 - Use HTTPS-only token/cookie handling in production
 - Rotate API keys regularly
+
+## Free-Tier OTP Setup (Student Friendly)
+
+Use this setup for zero-cost local development with real phone delivery.
+
+Backend `.env` minimum:
+
+```env
+AFRICASTALKING_USERNAME=sandbox
+AFRICASTALKING_API_KEY=your_africas_talking_sandbox_key
+AFRICASTALKING_SENDER_ID=
+
+WHATSAPP_TOKEN=your_meta_permanent_or_long_lived_token
+WHATSAPP_PHONE_NUMBER_ID=your_whatsapp_test_number_id
+
+OTP_ALLOW_DEV_FALLBACK=false
+DEBUG=False
+```
+
+Africa's Talking sandbox notes:
+- Keep `AFRICASTALKING_USERNAME=sandbox`.
+- Use sandbox API key from Africa's Talking dashboard.
+- OTP SMS uses `POST /api/alerts/otp/send/` with `channel: sms`.
+
+WhatsApp Cloud API free-tier notes:
+- Use Meta test number in the same app as your token.
+- Recipient phone must join the sandbox/test flow from Meta dashboard first.
+- OTP on WhatsApp uses `POST /api/alerts/otp/send/` with `channel: whatsapp`.
+
+Behavior implemented:
+- OTP is accepted only when provider confirms send.
+- OTP expires after 5 minutes.
+- Phone must verify OTP before subscription.
+- Alert dispatch sends emergency guidance and nearest rescue contacts over selected channels (`sms`, `whatsapp`, `push`).

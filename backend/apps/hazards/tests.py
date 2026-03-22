@@ -130,6 +130,44 @@ class IngestionTaskTests(TestCase):
     @patch('apps.hazards.tasks.fetch_open_meteo_data')
     @patch('apps.hazards.tasks.fetch_noaa_data')
     @patch('apps.hazards.tasks.fetch_kmd_data')
+    def test_ingestion_skips_alert_dispatch_for_medium_or_safe_risk(
+        self,
+        mock_kmd,
+        mock_noaa,
+        mock_open_meteo,
+        mock_analyze,
+        mock_dispatch,
+    ):
+        mock_kmd.return_value = [
+            {
+                'ward': 'Westlands',
+                'village': 'Kangemi',
+                'hazard_type': 'flood',
+                'severity_index': 42,
+                'geometry': {'coordinates': [36.81, -1.27]},
+            }
+        ]
+        mock_noaa.return_value = []
+        mock_open_meteo.return_value = []
+        mock_analyze.return_value = {
+            'risk_level': 'medium',
+            'risk_score': 42,
+            'guidance_en': 'Monitor updates.',
+            'guidance_sw': 'Fuatilia taarifa.',
+            'summary': 'Medium flood risk',
+        }
+
+        result = ingest_hazard_data_task()
+
+        self.assertEqual(result['created_observations'], 1)
+        self.assertEqual(result['dispatched_alert_jobs'], 0)
+        mock_dispatch.assert_not_called()
+
+    @patch('apps.hazards.tasks.dispatch_risk_alerts_task.delay')
+    @patch('apps.hazards.tasks.GeminiRiskAnalyzer.analyze')
+    @patch('apps.hazards.tasks.fetch_open_meteo_data')
+    @patch('apps.hazards.tasks.fetch_noaa_data')
+    @patch('apps.hazards.tasks.fetch_kmd_data')
     def test_ingestion_uses_open_meteo_fallback_when_primary_feeds_empty(
         self,
         mock_kmd,
@@ -161,10 +199,62 @@ class IngestionTaskTests(TestCase):
         result = ingest_hazard_data_task()
 
         self.assertEqual(result['created_observations'], 1)
+        self.assertEqual(result['dispatched_alert_jobs'], 1)
         observation = HazardObservation.objects.get()
         self.assertEqual(observation.source, 'open_meteo')
         self.assertEqual(observation.ward_name, 'Nairobi')
         mock_dispatch.assert_called_once()
+
+    @patch('apps.hazards.tasks.dispatch_risk_alerts_task.delay')
+    @patch('apps.hazards.tasks.GeminiRiskAnalyzer.analyze')
+    @patch('apps.hazards.tasks.fetch_open_meteo_data')
+    @patch('apps.hazards.tasks.fetch_noaa_data')
+    @patch('apps.hazards.tasks.fetch_kmd_data')
+    def test_ingestion_deduplicates_repeat_high_risk_alerts(
+        self,
+        mock_kmd,
+        mock_noaa,
+        mock_open_meteo,
+        mock_analyze,
+        mock_dispatch,
+    ):
+        RiskAssessment.objects.create(
+            ward_name='Westlands',
+            village_name='Kangemi',
+            hazard_type='flood',
+            risk_level='high',
+            risk_score=78,
+            guidance_en='Move to safe shelter.',
+            guidance_sw='Nenda makazi salama.',
+            summary='High flood risk already issued.',
+            location=Point(36.81, -1.27, srid=4326),
+        )
+
+        mock_kmd.return_value = [
+            {
+                'ward': 'Westlands',
+                'village': 'Kangemi',
+                'hazard_type': 'flood',
+                'severity_index': 81,
+                'geometry': {'coordinates': [36.81, -1.27]},
+            }
+        ]
+        mock_noaa.return_value = []
+        mock_open_meteo.return_value = []
+        mock_analyze.return_value = {
+            'risk_level': 'high',
+            'risk_score': 81,
+            'guidance_en': 'Avoid flood-prone roads.',
+            'guidance_sw': 'Epuka barabara zenye mafuriko.',
+            'summary': 'High flood risk',
+        }
+
+        result = ingest_hazard_data_task()
+
+        self.assertEqual(result['created_observations'], 1)
+        self.assertEqual(result['dispatched_alert_jobs'], 0)
+        self.assertEqual(result['dedup_skipped_alert_jobs'], 1)
+        mock_dispatch.assert_not_called()
 
 
 class PublicCoverageStatsApiTests(APITestCase):

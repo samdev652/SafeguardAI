@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbo",
+    "dev": "NEXT_DISABLE_WEBPACK_CACHE=1 next dev",
+    "dev:clean": "rm -rf .next && NEXT_DISABLE_WEBPACK_CACHE=1 next dev",
+    "dev:turbo": "next dev --turbo",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",

@@ -3,6 +3,7 @@
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSession } from 'next-auth/react';
 import { fetchCurrentRisks, fetchNearestRescueUnits } from '@/lib/api';
 import { RescueUnit, RiskAssessment, RiskLevel } from '@/lib/types';
 
@@ -56,6 +57,7 @@ function probabilityWidth(score: number): string {
 }
 
 export default function ThreatsPage() {
+  const { status } = useSession();
   const [loading, setLoading] = useState(true);
   const [risks, setRisks] = useState<RiskAssessment[]>([]);
   const [hazardFilter, setHazardFilter] = useState<HazardFilter>('all');
@@ -195,7 +197,9 @@ export default function ThreatsPage() {
         </div>
         <div className='top-nav-actions'>
           <Link href='/' className='signout-button'>Back home</Link>
-          <Link href='/register' className='sos-nav-button'>Get alerts</Link>
+          <Link href={status === 'authenticated' ? '/dashboard#alerts' : '/register'} className='sos-nav-button'>
+            {status === 'authenticated' ? 'My alerts' : 'Get alerts'}
+          </Link>
         </div>
       </header>
 

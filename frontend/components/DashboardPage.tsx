@@ -4,6 +4,7 @@ import dynamic from 'next/dynamic';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { signOut, useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
   acceptDispatch,
   dispatchSos,
@@ -109,8 +110,25 @@ export default function DashboardPage() {
   const [queue, setQueue] = useState<DispatchQueueItem[]>([]);
   const [queueBusyIds, setQueueBusyIds] = useState<number[]>([]);
   const [personalAlerts, setPersonalAlerts] = useState<PersonalAlert[]>([]);
+  const [personalAlertsBusy, setPersonalAlertsBusy] = useState(false);
+  const [alertsSyncMessage, setAlertsSyncMessage] = useState<string | null>(null);
+  const [livePopups, setLivePopups] = useState<Array<{ id: string; title: string; body: string }>>([]);
   const [freshRiskIds, setFreshRiskIds] = useState<number[]>([]);
   const latestRiskIdRef = useRef<number | null>(null);
+  const seenRiskIdsRef = useRef<Set<number>>(new Set());
+  const seenPersonalAlertIdsRef = useRef<Set<number>>(new Set());
+
+  const pushPopup = useCallback((title: string, body: string) => {
+    const popupId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setLivePopups((prev) => {
+      const next = [{ id: popupId, title, body }, ...prev];
+      return next.slice(0, 3);
+    });
+  }, []);
+
+  const dismissPopup = useCallback((id: string) => {
+    setLivePopups((prev) => prev.filter((item) => item.id !== id));
+  }, []);
 
   useEffect(() => {
     if (session?.wardName) setWard(session.wardName);
@@ -118,6 +136,25 @@ export default function DashboardPage() {
 
   const refreshRisks = useCallback(async () => {
     const [riskData, heatmapData] = await Promise.all([fetchCurrentRisks(ward), fetchWardHeatmap()]);
+
+    const hasBootstrapped = seenRiskIdsRef.current.size > 0;
+    const incomingIds = new Set(riskData.map((risk) => risk.id));
+    const newRisks = riskData.filter((risk) => !seenRiskIdsRef.current.has(risk.id));
+
+    if (hasBootstrapped) {
+      newRisks
+        .filter((risk) => risk.risk_level === 'high' || risk.risk_level === 'critical')
+        .slice(0, 2)
+        .forEach((risk) => {
+          pushPopup(
+            `${risk.risk_level.toUpperCase()} alert: ${risk.hazard_type}`,
+            `${risk.ward_name}${risk.village_name ? ` / ${risk.village_name}` : ''} - score ${Math.round(risk.risk_score)}%`
+          );
+        });
+    }
+
+    seenRiskIdsRef.current = incomingIds;
+
     if (riskData.length && latestRiskIdRef.current && riskData[0].id !== latestRiskIdRef.current) {
       setFreshRiskIds((prev) => [riskData[0].id, ...prev].slice(0, 10));
     }
@@ -125,7 +162,7 @@ export default function DashboardPage() {
     setRisks(riskData);
     setHeatmap(heatmapData);
     setLastUpdated(new Date().toISOString());
-  }, [ward]);
+  }, [pushPopup, ward]);
 
   useEffect(() => {
     refreshRisks().catch(() => undefined);
@@ -207,27 +244,62 @@ export default function DashboardPage() {
     };
   }, [role, session?.accessToken]);
 
+  const refreshPersonalAlerts = useCallback(async (showToast = false) => {
+    if (role !== 'citizen' || !session?.accessToken) return;
+    setPersonalAlertsBusy(true);
+    try {
+      const alerts = await fetchMyAlerts(session.accessToken as string);
+      setPersonalAlerts(alerts.slice(0, 3));
+
+      const hasBootstrapped = seenPersonalAlertIdsRef.current.size > 0;
+      const incomingIds = new Set(alerts.map((alert) => alert.id));
+      const newAlerts = alerts.filter((alert) => !seenPersonalAlertIdsRef.current.has(alert.id));
+      if (hasBootstrapped) {
+        newAlerts.slice(0, 2).forEach((alert) => {
+          pushPopup(`New ${alert.channel.toUpperCase()} alert`, alert.message);
+        });
+      }
+      seenPersonalAlertIdsRef.current = incomingIds;
+
+      if (showToast) {
+        setAlertsSyncMessage('Alerts synced successfully.');
+      }
+    } catch {
+      setPersonalAlerts([]);
+      if (showToast) {
+        setAlertsSyncMessage('Could not refresh alerts right now.');
+      }
+    } finally {
+      setPersonalAlertsBusy(false);
+    }
+  }, [pushPopup, role, session?.accessToken]);
+
   useEffect(() => {
     if (role !== 'citizen' || !session?.accessToken) {
       setPersonalAlerts([]);
       return;
     }
 
-    const refreshAlerts = async () => {
-      try {
-        const alerts = await fetchMyAlerts(session.accessToken as string);
-        setPersonalAlerts(alerts.slice(0, 3));
-      } catch {
-        setPersonalAlerts([]);
-      }
-    };
-
-    refreshAlerts().catch(() => undefined);
+    refreshPersonalAlerts(false).catch(() => undefined);
     const interval = window.setInterval(() => {
-      refreshAlerts().catch(() => undefined);
-    }, 60000);
+      refreshPersonalAlerts(false).catch(() => undefined);
+    }, 30000);
     return () => window.clearInterval(interval);
-  }, [role, session?.accessToken]);
+  }, [refreshPersonalAlerts, role, session?.accessToken]);
+
+  useEffect(() => {
+    if (!alertsSyncMessage) return;
+    const timeout = window.setTimeout(() => setAlertsSyncMessage(null), 2400);
+    return () => window.clearTimeout(timeout);
+  }, [alertsSyncMessage]);
+
+  useEffect(() => {
+    if (!livePopups.length) return;
+    const timeout = window.setTimeout(() => {
+      setLivePopups((prev) => prev.slice(0, -1));
+    }, 9000);
+    return () => window.clearTimeout(timeout);
+  }, [livePopups]);
 
   const sortedRisks = useMemo(() => {
     return [...risks].sort((a, b) => {
@@ -330,6 +402,47 @@ export default function DashboardPage() {
 
   return (
     <main className='dashboard-root'>
+      <div className='dashboard-alert-stack' aria-live='polite'>
+        <AnimatePresence>
+          {livePopups.map((popup) => (
+            <motion.article
+              key={popup.id}
+              initial={{ opacity: 0, x: 24, y: -10 }}
+              animate={{ opacity: 1, x: 0, y: 0 }}
+              exit={{ opacity: 0, x: 28, y: -8 }}
+              transition={{ duration: 0.22 }}
+              className='dashboard-alert-toast'
+            >
+              <strong>{popup.title}</strong>
+              <p>{popup.body}</p>
+              <div className='dashboard-alert-actions'>
+                <button type='button' onClick={() => dismissPopup(popup.id)}>
+                  Dismiss
+                </button>
+              </div>
+            </motion.article>
+          ))}
+          {alertsSyncMessage ? (
+            <motion.article
+              key={alertsSyncMessage}
+              initial={{ opacity: 0, x: 24, y: -10 }}
+              animate={{ opacity: 1, x: 0, y: 0 }}
+              exit={{ opacity: 0, x: 28, y: -8 }}
+              transition={{ duration: 0.22 }}
+              className='dashboard-alert-toast'
+            >
+              <strong>Alerts update</strong>
+              <p>{alertsSyncMessage}</p>
+              <div className='dashboard-alert-actions'>
+                <button type='button' onClick={() => setAlertsSyncMessage(null)}>
+                  Dismiss
+                </button>
+              </div>
+            </motion.article>
+          ) : null}
+        </AnimatePresence>
+      </div>
+
       <header className='top-nav'>
         <div className='top-nav-logo'>
           <span className='top-nav-logo-mark'>SG</span>
@@ -424,7 +537,7 @@ export default function DashboardPage() {
           </div>
 
           {role === 'citizen' ? (
-            <section className='personal-alerts'>
+            <section id='alerts' className='personal-alerts'>
               <h3>Personal Alerts</h3>
               {personalAlerts.length ? (
                 personalAlerts.map((alert) => (
@@ -439,6 +552,19 @@ export default function DashboardPage() {
                   <p>Monitoring your ward for high-impact risks and targeted guidance.</p>
                 </article>
               )}
+              <div className='personal-alert-actions'>
+                <button
+                  type='button'
+                  className='personal-alert-refresh'
+                  disabled={personalAlertsBusy}
+                  onClick={() => refreshPersonalAlerts(true).catch(() => undefined)}
+                >
+                  {personalAlertsBusy ? 'Refreshing...' : 'Get latest alerts'}
+                </button>
+                <button type='button' className='sos-nav-button' onClick={() => setOpenSosModal(true)}>
+                  Request nearby rescue
+                </button>
+              </div>
             </section>
           ) : null}
 

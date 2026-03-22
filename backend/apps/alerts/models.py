@@ -65,3 +65,38 @@ class IncidentReport(models.Model):
 
     class Meta:
         indexes = [models.Index(fields=['county_name', 'status', 'created_at'])]
+
+
+class CommunityVerificationPrompt(models.Model):
+    VOTE_YES = 'yes'
+    VOTE_NO = 'no'
+    VOTE_CHOICES = [
+        (VOTE_YES, 'Yes'),
+        (VOTE_NO, 'No'),
+    ]
+
+    risk_assessment = models.ForeignKey(
+        'hazards.RiskAssessment',
+        on_delete=models.CASCADE,
+        related_name='community_prompts',
+    )
+    citizen = models.ForeignKey(
+        'citizens.CitizenProfile',
+        on_delete=models.CASCADE,
+        related_name='community_prompts',
+    )
+    phone_number = models.CharField(max_length=20)
+    prompt_message = models.TextField()
+    vote = models.CharField(max_length=8, choices=VOTE_CHOICES, blank=True)
+    raw_reply = models.TextField(blank=True)
+    prompted_at = models.DateTimeField(auto_now_add=True)
+    replied_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['phone_number', 'prompted_at'])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['risk_assessment', 'citizen'],
+                name='unique_prompt_per_risk_and_citizen',
+            )
+        ]
