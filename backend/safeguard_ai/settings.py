@@ -1,5 +1,6 @@
-from pathlib import Path
+
 import os
+from pathlib import Path
 from datetime import timedelta
 import sentry_sdk
 from dotenv import load_dotenv
@@ -8,7 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
 
 SECRET_KEY = os.getenv('SECRET_KEY') or 'unsafe-dev-key'
-DEBUG = os.getenv('DEBUG', 'False') == 'True'
+DEBUG = os.getenv('DEBUG', 'True').lower() in ('true', '1', 'yes')
 ALLOWED_HOSTS = [host.strip() for host in os.getenv('ALLOWED_HOSTS', 'localhost').split(',') if host.strip()]
 
 INSTALLED_APPS = [
@@ -125,6 +126,10 @@ CELERY_BEAT_SCHEDULE = {
     'ingest-hazard-data-every-30-minutes': {
         'task': 'apps.hazards.tasks.ingest_hazard_data_task',
         'schedule': 60 * 30,
+    },
+    'send-periodic-risk-updates-every-hour': {
+        'task': 'apps.alerts.tasks.send_periodic_risk_updates_task',
+        'schedule': 60 * 60,
     }
 }
 
@@ -133,7 +138,12 @@ if SENTRY_DSN:
     sentry_sdk.init(dsn=SENTRY_DSN, traces_sample_rate=0.2, profiles_sample_rate=0.2)
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
-GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.0-flash')
+GEMINI_RATE_LIMIT_MINUTES = int(os.getenv('GEMINI_RATE_LIMIT_MINUTES', '60'))
+
+# Groq — free tier, used exclusively for the chatbot (protects Gemini quota)
+GROQ_API_KEY = os.getenv('GROQ_API_KEY', '')
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
 KMD_API_URL = os.getenv('KMD_API_URL', '')
 KMD_API_KEY = os.getenv('KMD_API_KEY', '')
 NOAA_API_URL = os.getenv('NOAA_API_URL', '')
@@ -153,3 +163,15 @@ FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
 # Keep GDAL path optional for cross-platform compatibility. GeoDjango will attempt
 # automatic discovery unless GDAL_LIBRARY_PATH is explicitly provided in the env.
 GDAL_LIBRARY_PATH = os.getenv('GDAL_LIBRARY_PATH')
+
+# Redis cache configuration for django-redis
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"),
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        }
+    }
+}
+

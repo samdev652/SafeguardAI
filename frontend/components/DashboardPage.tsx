@@ -18,40 +18,9 @@ import {
   PersonalAlert,
   riskEventsUrl,
 } from '@/lib/api';
-  // Real-time SSE subscription for calamities
-  useEffect(() => {
-    const url = riskEventsUrl();
-    const eventSource = new EventSource(url);
-    eventSource.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        // Only update if the ward matches or no ward filter is set
-        if (!ward || payload.ward_name?.toLowerCase() === ward.toLowerCase()) {
-          setRisks((prev) => {
-            // Replace or add the new risk by id
-            const idx = prev.findIndex((r) => r.id === payload.id);
-            if (idx !== -1) {
-              const updated = [...prev];
-              updated[idx] = payload;
-              return updated;
-            }
-            return [payload, ...prev].slice(0, 100);
-          });
-        }
-      } catch (e) {
-        // Ignore parse errors
-      }
-    };
-    eventSource.onerror = () => {
-      // Optionally handle errors or reconnect
-    };
-    return () => {
-      eventSource.close();
-    };
-  }, [ward]);
-
 import { RescueUnit, RiskAssessment, RiskLevel, WardHeatmapFeatureCollection } from '@/lib/types';
 import ForecastCard, { DayForecast } from '@/components/ForecastCard';
+
 // Fetch 7-day forecast for a ward
 async function fetchForecast(ward: string): Promise<DayForecast[]> {
   const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
@@ -134,29 +103,6 @@ function probabilityWidth(score: number): string {
 }
 
 export default function DashboardPage() {
-    // Forecast state
-    const [forecast, setForecast] = useState<DayForecast[] | null>(null);
-    const [forecastError, setForecastError] = useState<string | null>(null);
-    const [forecastLoading, setForecastLoading] = useState(false);
-    // Fetch forecast when ward changes
-    useEffect(() => {
-      let ignore = false;
-      setForecastLoading(true);
-      setForecastError(null);
-      fetchForecast(ward)
-        .then((data) => {
-          if (!ignore) setForecast(data);
-        })
-        .catch((err) => {
-          if (!ignore) setForecastError('Could not load forecast');
-        })
-        .finally(() => {
-          if (!ignore) setForecastLoading(false);
-        });
-      return () => {
-        ignore = true;
-      };
-    }, [ward]);
   const { data: session, status } = useSession();
   const router = useRouter();
   const role: UserRole = (session?.role as UserRole) || 'citizen';
@@ -177,11 +123,65 @@ export default function DashboardPage() {
   const [personalAlerts, setPersonalAlerts] = useState<PersonalAlert[]>([]);
   const [personalAlertsBusy, setPersonalAlertsBusy] = useState(false);
   const [alertsSyncMessage, setAlertsSyncMessage] = useState<string | null>(null);
+  const [demoTriggerBusy, setDemoTriggerBusy] = useState(false);
   const [livePopups, setLivePopups] = useState<Array<{ id: string; title: string; body: string }>>([]);
   const [freshRiskIds, setFreshRiskIds] = useState<number[]>([]);
   const latestRiskIdRef = useRef<number | null>(null);
   const seenRiskIdsRef = useRef<Set<number>>(new Set());
   const seenPersonalAlertIdsRef = useRef<Set<number>>(new Set());
+
+  // Forecast state
+  const [forecast, setForecast] = useState<DayForecast[] | null>(null);
+  const [forecastError, setForecastError] = useState<string | null>(null);
+  const [forecastLoading, setForecastLoading] = useState(false);
+
+  // Fetch forecast when ward changes
+  useEffect(() => {
+    let ignore = false;
+    setForecastLoading(true);
+    setForecastError(null);
+    fetchForecast(ward)
+      .then((data) => {
+        if (!ignore) setForecast(data);
+      })
+      .catch(() => {
+        if (!ignore) setForecastError('Could not load forecast');
+      })
+      .finally(() => {
+        if (!ignore) setForecastLoading(false);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [ward]);
+
+  // Real-time SSE subscription for calamities
+  useEffect(() => {
+    const url = riskEventsUrl();
+    const eventSource = new EventSource(url);
+    eventSource.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (!ward || payload.ward_name?.toLowerCase() === ward.toLowerCase()) {
+          setRisks((prev) => {
+            const idx = prev.findIndex((r) => r.id === payload.id);
+            if (idx !== -1) {
+              const updated = [...prev];
+              updated[idx] = payload;
+              return updated;
+            }
+            return [payload, ...prev].slice(0, 100);
+          });
+        }
+      } catch {
+        // Ignore parse errors
+      }
+    };
+    eventSource.onerror = () => {};
+    return () => {
+      eventSource.close();
+    };
+  }, [ward]);
 
   const pushPopup = useCallback((title: string, body: string) => {
     const popupId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -458,6 +458,28 @@ export default function DashboardPage() {
     [session?.accessToken]
   );
 
+  const handleTriggerDemo = useCallback(async () => {
+    if (!session?.accessToken) return;
+    setDemoTriggerBusy(true);
+    pushPopup('Demo Triggered', 'Artificial anomaly injected. Awaiting Gemini analysis...');
+    try {
+      const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+      const res = await fetch(`${API_BASE_URL}/api/risk/ingest/trigger/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.accessToken}`,
+        },
+        body: JSON.stringify({ force_demo_ward: ward }),
+      });
+      if (!res.ok) throw new Error('Failed');
+    } catch {
+      pushPopup('Demo Error', 'Could not reach analysis engine. Check backend logs.');
+    } finally {
+      setTimeout(() => setDemoTriggerBusy(false), 2000);
+    }
+  }, [session?.accessToken, ward, pushPopup]);
+
   const roleLabel =
     role === 'county_official'
       ? 'County Official'
@@ -636,6 +658,15 @@ export default function DashboardPage() {
                 >
                   {personalAlertsBusy ? 'Refreshing...' : 'Get latest alerts'}
                 </button>
+                <button
+                  type='button'
+                  className='sos-nav-button'
+                  onClick={handleTriggerDemo}
+                  disabled={demoTriggerBusy}
+                  style={{ background: '#EF4444', color: '#fff', border: 'none' }}
+                >
+                  {demoTriggerBusy ? 'Injecting Anomaly...' : 'Simulate Live Disaster'}
+                </button>
                 <button type='button' className='sos-nav-button' onClick={() => setOpenSosModal(true)}>
                   Request nearby rescue
                 </button>
@@ -791,7 +822,11 @@ export default function DashboardPage() {
                             ))}
                           </ul>
                         ) : (
-                          <p className='units-loading'>No active responders nearby right now.</p>
+                          <ul className='units-list'>
+                            <li><strong>Police / Rapid Response:</strong> 999 / 112</li>
+                            <li><strong>Kenya Red Cross ({risk.county_name || 'Branch'}):</strong> +254 700 395 395</li>
+                            <li><strong>Nearest Hospital:</strong> {risk.county_name || 'County'} Referral Hospital (Emergency: 0800 721 211)</li>
+                          </ul>
                         )}
                       </div>
                     </div>

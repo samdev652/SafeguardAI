@@ -1,87 +1,304 @@
 import json
+import logging
 import re
 import requests
+from datetime import datetime
 from django.conf import settings
+from django.core.cache import cache
+
+logger = logging.getLogger(__name__)
 
 
 class GeminiRiskAnalyzer:
     _ALLOWED_LEVELS = {'safe', 'medium', 'high', 'critical'}
+    _DOWNGRADE_MAP = {'critical': 'high', 'high': 'medium', 'medium': 'safe', 'safe': 'safe'}
 
+    _HAZARD_THRESHOLDS = {
+        'flood': (
+            'Flood risk thresholds:\n'
+            '  - Medium: precipitation 10–18 mm/24h OR soil moisture 0.30–0.38 m³/m³\n'
+            '  - High: precipitation 18–35 mm/24h OR soil moisture > 0.38 m³/m³\n'
+            '  - Critical: precipitation > 35 mm/24h AND soil moisture > 0.42 m³/m³'
+        ),
+        'landslide': (
+            'Landslide risk thresholds:\n'
+            '  - Medium: precipitation 8–12 mm/24h and soil moisture 0.28–0.32 m³/m³ on slopes\n'
+            '  - High: precipitation 12–20 mm/24h and soil moisture > 0.32 m³/m³ on slopes\n'
+            '  - Critical: precipitation > 20 mm/24h and soil moisture > 0.36 m³/m³ on steep terrain'
+        ),
+        'drought': (
+            'Drought risk thresholds:\n'
+            '  - Medium: soil moisture 0.15–0.18 m³/m³ and rainfall < 5 mm in 7 days\n'
+            '  - High: soil moisture < 0.15 m³/m³ and rainfall < 2 mm in 7 days\n'
+            '  - Critical: soil moisture < 0.10 m³/m³ and rainfall 0 mm in 14 days'
+        ),
+        'earthquake': (
+            'Earthquake risk thresholds:\n'
+            '  - ONLY seismic zones (Rift Valley counties, Nairobi, Mombasa, Kwale, Kilifi, '
+            'Tana River, Lamu) may exceed medium.\n'
+            '  - All other Kenyan counties: NEVER above medium regardless of data.'
+        ),
+        'storm': (
+            'Storm risk thresholds:\n'
+            '  - Medium: wind speed 40–55 km/h\n'
+            '  - High: wind speed 55–80 km/h with gusts\n'
+            '  - Critical: wind speed > 80 km/h or confirmed tornado/cyclone conditions'
+        ),
+    }
 
-    def analyze(self, observation: dict) -> dict:
-        import logging
-        if not settings.GEMINI_API_KEY:
-            return self._fallback(observation)
+    _SEISMIC_ZONES = {
+        'nakuru', 'narok', 'kajiado', 'baringo', 'elgeyo marakwet', 'turkana',
+        'west pokot', 'samburu', 'laikipia', 'nyandarua', 'kericho', 'bomet',
+        'nairobi', 'mombasa', 'kwale', 'kilifi', 'tana river', 'lamu',
+    }
 
-        # --- 1. Scientific rainfall and soil moisture thresholds ---
-        hazard_thresholds = {
-            'flood': 'Flood risk: precipitation > 18mm in 24h or soil moisture > 0.38 m3/m3',
-            'landslide': 'Landslide risk: precipitation > 12mm in 24h and soil moisture > 0.32 m3/m3 on slopes',
-            'drought': 'Drought risk: soil moisture < 0.18 m3/m3 and rainfall < 2mm in 7 days',
-            'earthquake': 'Earthquake risk: only above medium in seismic counties (e.g. Rift Valley); never high/critical elsewhere',
-        }
-        hazard_type = observation.get('hazard_type', '').lower()
-        threshold_text = hazard_thresholds.get(hazard_type, '')
+    # ------------------------------------------------------------------ #
+    #  Rate limiting — one Gemini call per ward+hazard within N minutes   #
+    # ------------------------------------------------------------------ #
 
-        # --- 2. Add current month and Kenya's seasonal rainfall context ---
-        from datetime import datetime
-        month = datetime.now().strftime('%B')
-        kenya_seasons = (
-            'Kenya rainfall context: March-May (long rains), Oct-Dec (short rains), Jan-Feb/Jun-Sep (dry). '
-            'Compare current month to normal rainfall for this area.'
+    @staticmethod
+    def _rate_limit_key(ward_name: str, hazard_type: str) -> str:
+        ward = (ward_name or 'unknown').strip().lower().replace(' ', '_')
+        hazard = (hazard_type or 'unknown').strip().lower()
+        return f'gemini_rl:{ward}:{hazard}'
+
+    def _is_rate_limited(self, observation: dict) -> bool:
+        key = self._rate_limit_key(
+            observation.get('ward_name', ''),
+            observation.get('hazard_type', ''),
         )
+        return cache.get(key) is not None
 
-        # --- 3. Hard rules section ---
-        hard_rules = (
-            '\nHARD RULES:\n'
-            '- Never return high or critical risk without citing a specific number from the weather data.\n'
-            '- Never invent data values.\n'
-            '- Never predict earthquake risk above medium for non-seismic Kenyan counties.\n'
-            '- If weather data is missing, return low risk and note missing data, do not guess.'
+    def _set_rate_limit(self, observation: dict) -> None:
+        key = self._rate_limit_key(
+            observation.get('ward_name', ''),
+            observation.get('hazard_type', ''),
         )
+        timeout = getattr(settings, 'GEMINI_RATE_LIMIT_MINUTES', 60) * 60
+        cache.set(key, True, timeout=timeout)
 
-        prompt = (
-            f'You are a disaster risk analyst for Kenya. It is {month}. {kenya_seasons}\n'
-            f'{threshold_text}\n'
-            'Return JSON only with keys risk_level, risk_score, guidance_en, guidance_sw, summary, confidence.\n'
-            f'Input data: {json.dumps(observation)}\n'
-            f'{hard_rules}'
-        )
+    # ------------------------------------------------------------------ #
+    #  Gemini HTTP helper                                                 #
+    # ------------------------------------------------------------------ #
 
+    def _gemini_call(self, prompt: str, response_mime: str = 'application/json', timeout: int = 20) -> str:
         url = (
             f'https://generativelanguage.googleapis.com/v1beta/models/'
             f'{settings.GEMINI_MODEL}:generateContent?key={settings.GEMINI_API_KEY}'
         )
         payload = {
             'contents': [{'parts': [{'text': prompt}]}],
-            'generationConfig': {'responseMimeType': 'application/json'},
+            'generationConfig': {'responseMimeType': response_mime},
         }
+        try:
+            response = requests.post(url, json=payload, timeout=timeout)
+            response.raise_for_status()
+            logger.info('AI prediction handled by: Gemini')
+            return response.json()['candidates'][0]['content']['parts'][0]['text']
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                logger.warning('Gemini 429 Quota Exceeded. Falling back to Groq.')
+                return self._groq_call(prompt, response_mime, timeout)
+            raise
+
+    def _groq_call(self, prompt: str, response_mime: str = 'application/json', timeout: int = 20) -> str:
+        url = 'https://api.groq.com/openai/v1/chat/completions'
+        headers = {
+            'Authorization': f'Bearer {settings.GROQ_API_KEY}',
+            'Content-Type': 'application/json',
+        }
+        response_format = {"type": "json_object"} if response_mime == 'application/json' else {"type": "text"}
+        payload = {
+            'model': settings.GROQ_MODEL,
+            'messages': [{'role': 'user', 'content': prompt}],
+            'temperature': 0.1,
+            'response_format': response_format,
+        }
+        response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        response.raise_for_status()
+        logger.info('AI prediction handled by: Groq (Fallback)')
+        return response.json()['choices'][0]['message']['content']
+
+    # ------------------------------------------------------------------ #
+    #  Second-pass verification for high/critical assessments             #
+    # ------------------------------------------------------------------ #
+
+    def _verify_assessment(self, observation: dict, first_result: dict) -> dict:
+        """Make a second independent Gemini call to verify a high/critical assessment.
+
+        If the verification disagrees (returns a lower risk level), downgrade
+        by one step.  Returns the potentially-adjusted result dict.
+        """
+        risk_level = first_result.get('risk_level', '').lower()
+        if risk_level not in ('high', 'critical'):
+            return first_result
+
+        verification_prompt = (
+            'You are an independent disaster risk reviewer for Kenya.\n'
+            'A previous analysis produced the assessment below. Your job is to '
+            'verify whether the risk level is justified by the raw weather data.\n\n'
+            f'Weather observation: {json.dumps(observation)}\n'
+            f'Previous assessment: {json.dumps(first_result)}\n\n'
+            'Return JSON only with keys: verified (boolean), recommended_risk_level '
+            '(safe|medium|high|critical), reason (string).\n'
+            'If the data does NOT support the claimed risk level, set verified=false '
+            'and lower recommended_risk_level accordingly.'
+        )
 
         try:
-            response = requests.post(url, json=payload, timeout=20)
-            response.raise_for_status()
-            text = response.json()['candidates'][0]['content']['parts'][0]['text']
+            text = self._gemini_call(verification_prompt)
+            verification = self._parse_structured_response(text)
+
+            verified = verification.get('verified')
+            if isinstance(verified, str):
+                verified = verified.lower() in ('true', '1', 'yes')
+
+            recommended = str(verification.get('recommended_risk_level', '')).strip().lower()
+            reason = str(verification.get('reason', '')).strip()
+
+            if not verified and recommended in self._ALLOWED_LEVELS:
+                # Only downgrade (never upgrade from verification)
+                level_order = ['safe', 'medium', 'high', 'critical']
+                if level_order.index(recommended) < level_order.index(risk_level):
+                    downgraded = self._DOWNGRADE_MAP.get(risk_level, risk_level)
+                    logger.warning(
+                        'Gemini verification DISAGREED: %s → %s (recommended=%s, reason=%s) '
+                        'for ward=%s hazard=%s',
+                        risk_level, downgraded, recommended, reason,
+                        observation.get('ward_name'), observation.get('hazard_type'),
+                    )
+                    first_result['risk_level'] = downgraded
+                    return first_result
+
+            logger.info(
+                'Gemini verification AGREED with %s for ward=%s hazard=%s',
+                risk_level, observation.get('ward_name'), observation.get('hazard_type'),
+            )
+        except Exception as exc:
+            logger.error('Gemini verification call failed: %s', exc)
+            # On verification failure, conservatively downgrade
+            downgraded = self._DOWNGRADE_MAP.get(risk_level, risk_level)
+            logger.warning(
+                'Verification unavailable — conservatively downgrading %s → %s '
+                'for ward=%s hazard=%s',
+                risk_level, downgraded,
+                observation.get('ward_name'), observation.get('hazard_type'),
+            )
+            first_result['risk_level'] = downgraded
+
+        return first_result
+
+    # ------------------------------------------------------------------ #
+    #  Main analysis entry point                                          #
+    # ------------------------------------------------------------------ #
+
+    def analyze(self, observation: dict, bypass_rate_limit: bool = False) -> dict:
+        if not settings.GEMINI_API_KEY:
+            return self._fallback(observation)
+
+        # --- Rate limiting ---
+        if not bypass_rate_limit and self._is_rate_limited(observation):
+            logger.info(
+                'Gemini rate-limited for ward=%s hazard=%s — returning fallback',
+                observation.get('ward_name'), observation.get('hazard_type'),
+            )
+            return self._fallback(observation)
+
+        # --- Build prompt with scientific thresholds + seasonal context ---
+        hazard_type = observation.get('hazard_type', '').lower()
+        threshold_text = self._HAZARD_THRESHOLDS.get(hazard_type, '')
+
+        month = datetime.now().strftime('%B')
+        kenya_seasons = (
+            'Kenya rainfall context: March-May (long rains, heaviest nationwide), '
+            'Oct-Dec (short rains), Jan-Feb/Jun-Sep (dry seasons). '
+            f'Current month is {month}. Compare observed values to seasonal norms '
+            'for this specific area before assigning risk.'
+        )
+
+        seismic_note = ''
+        if hazard_type == 'earthquake':
+            ward = observation.get('ward_name', '').lower()
+            if not any(zone in ward for zone in self._SEISMIC_ZONES):
+                seismic_note = (
+                    '\nIMPORTANT: This location is NOT in a known Kenyan seismic zone. '
+                    'You MUST NOT return risk above medium.'
+                )
+
+        hard_rules = (
+            '\n\nHARD RULES (you MUST follow these):\n'
+            '1. NEVER return high or critical risk without citing a specific number '
+            '   from the input weather data that exceeds the threshold above.\n'
+            '2. NEVER invent or assume data values not present in the input.\n'
+            '3. NEVER predict earthquake risk above medium for counties outside '
+            '   the Rift Valley, Nairobi, and coastal seismic zones '
+            '   (Mombasa, Kwale, Kilifi, Tana River, Lamu).\n'
+            '4. If weather data is missing or incomplete, return risk_level "safe" '
+            '   and note the missing data in the summary. Do NOT guess.\n'
+            '5. The confidence field must be a float between 0.0 and 1.0 reflecting '
+            '   how certain you are given the available data.'
+        )
+
+        prompt = (
+            f'You are a disaster risk analyst for Kenya. It is {month}.\n'
+            f'{kenya_seasons}\n\n'
+            f'SCIENTIFIC THRESHOLDS FOR {hazard_type.upper()}:\n{threshold_text}\n'
+            f'{seismic_note}\n\n'
+            'Return JSON only with keys: risk_level (safe|medium|high|critical), '
+            'risk_score (0-100), guidance_en, guidance_sw, summary, confidence (0.0-1.0).\n\n'
+            f'Input weather data: {json.dumps(observation)}'
+            f'{hard_rules}'
+        )
+
+        try:
+            text = self._gemini_call(prompt)
             parsed = self._parse_structured_response(text)
-            # --- 4. Confidence threshold check ---
+
+            # --- Confidence threshold check ---
             confidence = parsed.get('confidence')
             try:
                 confidence = float(confidence)
             except (TypeError, ValueError):
                 confidence = 0.0
+
             orig_level = parsed.get('risk_level', '').lower()
-            downgrade_map = {'critical': 'high', 'high': 'medium', 'medium': 'safe', 'safe': 'safe'}
+
             if confidence < 0.65:
-                logging.warning(f"Gemini assessment discarded (confidence={confidence:.2f}): {parsed}")
+                logger.warning(
+                    'Gemini assessment DISCARDED (confidence=%.2f) for ward=%s hazard=%s: %s',
+                    confidence, observation.get('ward_name'),
+                    observation.get('hazard_type'), parsed,
+                )
                 return self._fallback(observation)
-            elif confidence < 0.75:
-                downgraded = downgrade_map.get(orig_level, 'safe')
+
+            if confidence < 0.75:
+                downgraded = self._DOWNGRADE_MAP.get(orig_level, 'safe')
                 if downgraded != orig_level:
-                    logging.info(f"Gemini assessment downgraded from {orig_level} to {downgraded} (confidence={confidence:.2f}): {parsed}")
+                    logger.info(
+                        'Gemini assessment DOWNGRADED %s → %s (confidence=%.2f) '
+                        'for ward=%s hazard=%s',
+                        orig_level, downgraded, confidence,
+                        observation.get('ward_name'), observation.get('hazard_type'),
+                    )
                     parsed['risk_level'] = downgraded
-            return self._normalize_analysis(parsed, observation)
+
+            result = self._normalize_analysis(parsed, observation)
+
+            # --- Second verification call for high/critical ---
+            result = self._verify_assessment(observation, result)
+
+            # --- Record rate limit after successful call ---
+            self._set_rate_limit(observation)
+
+            return result
+
         except Exception as e:
-            logging.error(f"Gemini analysis error: {e}")
-            return self._fallback(observation)
+            logger.error('Gemini analysis error: %s', e)
+            return None
+
+    # ------------------------------------------------------------------ #
+    #  Response parsing & normalization                                    #
+    # ------------------------------------------------------------------ #
 
     def _parse_structured_response(self, text: str) -> dict:
         raw = str(text or '').strip()
@@ -150,38 +367,8 @@ class GeminiRiskAnalyzer:
         }
 
 
-    def chat(self, messages, language='en'):
-        """
-        messages: list of {role: 'system'|'user'|'assistant', content: str}
-        language: 'en' or 'sw'
-        """
-        import requests
-        import json
-        from django.conf import settings
-        prompt_parts = []
-        for m in messages:
-            if m['role'] == 'system':
-                prompt_parts.append(f"[SYSTEM]\n{m['content']}")
-            elif m['role'] == 'user':
-                prompt_parts.append(f"[USER]\n{m['content']}")
-            elif m['role'] == 'assistant':
-                prompt_parts.append(f"[ASSISTANT]\n{m['content']}")
-        prompt = '\n'.join(prompt_parts)
-        url = (
-            f'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'{settings.GEMINI_MODEL}:generateContent?key={settings.GEMINI_API_KEY}'
-        )
-        payload = {
-            'contents': [{'parts': [{'text': prompt}]}],
-            'generationConfig': {'responseMimeType': 'text/plain'},
-        }
-        try:
-            response = requests.post(url, json=payload, timeout=30)
-            response.raise_for_status()
-            text = response.json()['candidates'][0]['content']['parts'][0]['text']
-            return text.strip()
-        except Exception as e:
-            return 'Sorry, I could not process your request at this time.'
+
+
 
 
 def fetch_kmd_data() -> list[dict]:
@@ -205,11 +392,36 @@ def fetch_noaa_data() -> list[dict]:
 
 
 DEFAULT_OPEN_METEO_POINTS = [
-    ('Nairobi', -1.286389, 36.817223),
-    ('Mombasa', -4.0435, 39.6682),
-    ('Kisumu', -0.0917, 34.768),
-    ('Nakuru', -0.3031, 36.08),
-    ('Eldoret', 0.5143, 35.2698),
+    # Nairobi
+    ('Westlands', -1.2648, 36.8172),
+    ('Kibra', -1.3107, 36.7878),
+    ('Langata', -1.3667, 36.7333),
+    # Mombasa
+    ('Mvita', -4.0435, 39.6682),
+    ('Nyali', -4.0226, 39.7127),
+    # Kisumu
+    ('Kisumu Central', -0.0917, 34.768),
+    ('Kondele', -0.08, 34.75),
+    # Nakuru
+    ('Nakuru Town East', -0.2833, 36.0833),
+    ('Njoro', -0.331, 35.946),
+    ('Naivasha', -0.7167, 36.4333),
+    # Murang'a
+    ('Kangema', -0.685, 36.965),
+    ('Kiharu', -0.718, 37.053),
+    # Turkana
+    ('Turkana Central', 3.1166, 35.5966),
+    # Kilifi
+    ('Kilifi North', -3.6333, 39.85),
+    ('Malindi Town', -3.2138, 40.1169),
+    # Busia
+    ('Teso North', 0.4605, 34.1296),
+    ('Budalangi', 0.1133, 34.0833),
+    # Tana River
+    ('Garsen', -2.2833, 40.1167),
+    ('Bura', -1.1, 39.95),
+    # Mandera
+    ('Mandera East', 3.9373, 41.8569),
 ]
 
 

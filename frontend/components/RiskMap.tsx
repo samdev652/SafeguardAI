@@ -152,9 +152,9 @@ export default function RiskMap({ risks, heatmap }: RiskMapProps) {
               <br />
               Risk: {risk.risk_level.toUpperCase()} ({Math.round(risk.risk_score)}%)
               <br />
-              Predicted: {new Date(risk.issued_at).toLocaleString()}
-              <br />
-              {risk.summary}
+              <em style={{ fontSize: '11px', color: '#a7b6d2' }}>
+                What to do now: {risk.guidance_en || risk.summary}
+              </em>
             </Popup>
           </CircleMarker>
 

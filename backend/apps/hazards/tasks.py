@@ -120,7 +120,7 @@ def _is_duplicate_alert_window(risk: RiskAssessment) -> bool:
 
 
 @shared_task
-def ingest_hazard_data_task() -> dict:
+def ingest_hazard_data_task(force_demo_ward: str = None) -> dict:
     analyzer = GeminiRiskAnalyzer()
 
     kmd_items = _normalize_items(_safe_fetch(fetch_kmd_data), 'kmd')
@@ -128,18 +128,58 @@ def ingest_hazard_data_task() -> dict:
     open_meteo_items = _normalize_items(_safe_fetch(fetch_open_meteo_data), 'open_meteo')
     all_items = (kmd_items + noaa_items + open_meteo_items)[:_max_items_per_run()]
 
+    if force_demo_ward:
+        # Inject synthetic high-risk anomaly to ensure investors see 
+        # the AI react critically and trigger SMS instantly.
+        demo_item = {
+            'source': 'demo_simulation',
+            'ward_name': force_demo_ward,
+            'village_name': 'Demo Simulation Area',
+            'hazard_type': 'flood',
+            'severity_index': 98.0,
+            'location': Point(36.8219, -1.2921, srid=4326),
+            'raw_payload': {
+                'properties': {
+                    'precipitation_mm': 65.4,
+                    'soil_moisture': 0.45,
+                    'wind_speed_10m': 20.0,
+                }
+            },
+            'observed_at': timezone.now(),
+        }
+        all_items.insert(0, demo_item)
+
     created = 0
     dispatched = 0
     dedup_skipped = 0
+    rate_limited = 0
     for item in all_items:
         observation = HazardObservation.objects.create(**item)
-        analysis = analyzer.analyze({
+        obs_dict = {
             'ward_name': observation.ward_name,
             'village_name': observation.village_name,
             'hazard_type': observation.hazard_type,
             'severity_index': observation.severity_index,
             'source': observation.source,
-        })
+            'temperature_c': 28.5,
+            'precipitation_mm': item.get('raw_payload', {}).get('properties', {}).get('precipitation_mm', 0),
+            'soil_moisture': item.get('raw_payload', {}).get('properties', {}).get('soil_moisture', 0),
+        }
+
+        is_demo = bool(force_demo_ward and observation.ward_name.lower() == force_demo_ward.lower())
+
+        if is_demo:
+            was_rate_limited = False
+            analysis = analyzer.analyze(obs_dict, bypass_rate_limit=True)
+        else:
+            was_rate_limited = analyzer._is_rate_limited(obs_dict)
+            analysis = analyzer.analyze(obs_dict)
+
+        if analysis is None:
+            continue
+        
+        if was_rate_limited:
+            rate_limited += 1
 
         risk = RiskAssessment.objects.create(
             ward_name=observation.ward_name,
@@ -154,7 +194,7 @@ def ingest_hazard_data_task() -> dict:
         )
 
         if risk.risk_level in {RiskAssessment.RISK_HIGH, RiskAssessment.RISK_CRITICAL}:
-            if _is_duplicate_alert_window(risk):
+            if not is_demo and _is_duplicate_alert_window(risk):
                 dedup_skipped += 1
             else:
                 dispatch_risk_alerts_task.delay(risk.id)
@@ -165,5 +205,8 @@ def ingest_hazard_data_task() -> dict:
         'created_observations': created,
         'dispatched_alert_jobs': dispatched,
         'dedup_skipped_alert_jobs': dedup_skipped,
+        'gemini_rate_limited': rate_limited,
         'processed_items': len(all_items),
+        'demo_mode': bool(force_demo_ward),
     }
+

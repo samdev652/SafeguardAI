@@ -1,7 +1,8 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import Providers from '@/components/Providers';
-import ChatbotWidget from '@/components/ChatbotWidget';
+import dynamic from 'next/dynamic';
+const ChatWidget = dynamic(() => import('@/components/ChatWidget'), { ssr: false });
 
 export const metadata: Metadata = {
   title: 'Safeguard AI',
@@ -14,7 +15,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body>
         <Providers>{children}</Providers>
-        <ChatbotWidget threatCount={0} />
+        <ChatWidget />
       </body>
     </html>
   );

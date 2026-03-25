@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 from django.contrib.auth.models import User
 from django.contrib.gis.geos import MultiPolygon, Point, Polygon
@@ -291,3 +292,110 @@ class PublicCoverageStatsApiTests(APITestCase):
         nairobi = next((item for item in response.data['counties'] if item['county_name'] == 'Nairobi'), None)
         self.assertIsNotNone(nairobi)
         self.assertEqual(nairobi['registered_users'], 1)
+
+
+class GeminiRateLimitTests(TestCase):
+    """Test Redis-based rate limiting in GeminiRiskAnalyzer."""
+
+    def setUp(self):
+        from apps.hazards.services import GeminiRiskAnalyzer
+        self.analyzer = GeminiRiskAnalyzer()
+        self.observation = {
+            'ward_name': 'Westlands',
+            'hazard_type': 'flood',
+            'severity_index': 72,
+            'source': 'open_meteo',
+        }
+
+    @patch('apps.hazards.services.cache')
+    @patch.object(__import__('apps.hazards.services', fromlist=['GeminiRiskAnalyzer']).GeminiRiskAnalyzer, '_gemini_call')
+    def test_rate_limited_returns_fallback_without_gemini_call(self, mock_gemini_call, mock_cache):
+        mock_cache.get.return_value = True  # rate-limited
+        with self.settings(GEMINI_API_KEY='test-key'):
+            result = self.analyzer.analyze(self.observation)
+        mock_gemini_call.assert_not_called()
+        self.assertEqual(result['risk_level'], 'high')  # severity 72 → fallback high
+
+    @patch('apps.hazards.services.cache')
+    @patch.object(__import__('apps.hazards.services', fromlist=['GeminiRiskAnalyzer']).GeminiRiskAnalyzer, '_gemini_call')
+    def test_rate_limit_key_stored_after_successful_analysis(self, mock_gemini_call, mock_cache):
+        mock_cache.get.return_value = None  # not rate-limited
+        mock_gemini_call.return_value = json.dumps({
+            'risk_level': 'medium',
+            'risk_score': 45,
+            'guidance_en': 'Monitor.',
+            'guidance_sw': 'Fuatilia.',
+            'summary': 'Medium risk.',
+            'confidence': 0.85,
+        })
+        with self.settings(GEMINI_API_KEY='test-key', GEMINI_RATE_LIMIT_MINUTES=60):
+            self.analyzer.analyze(self.observation)
+        mock_cache.set.assert_called_once()
+        call_args = mock_cache.set.call_args
+        self.assertIn('gemini_rl:', call_args[0][0])
+        self.assertEqual(call_args[1].get('timeout') or call_args[0][2], 3600)
+
+
+class GeminiVerificationTests(TestCase):
+    """Test the second-pass verification call for high/critical assessments."""
+
+    def setUp(self):
+        from apps.hazards.services import GeminiRiskAnalyzer
+        self.analyzer = GeminiRiskAnalyzer()
+        self.observation = {
+            'ward_name': 'Westlands',
+            'hazard_type': 'flood',
+            'severity_index': 82,
+            'source': 'open_meteo',
+        }
+
+    @patch('apps.hazards.services.cache')
+    @patch.object(__import__('apps.hazards.services', fromlist=['GeminiRiskAnalyzer']).GeminiRiskAnalyzer, '_gemini_call')
+    def test_verification_disagrees_downgrades_high_to_medium(self, mock_gemini_call, mock_cache):
+        mock_cache.get.return_value = None
+        # First call returns high with good confidence
+        # Second call (verification) disagrees
+        mock_gemini_call.side_effect = [
+            json.dumps({
+                'risk_level': 'high',
+                'risk_score': 78,
+                'guidance_en': 'Move to safety.',
+                'guidance_sw': 'Nenda mahali salama.',
+                'summary': 'High flood risk.',
+                'confidence': 0.82,
+            }),
+            json.dumps({
+                'verified': False,
+                'recommended_risk_level': 'medium',
+                'reason': 'Precipitation is below high threshold.',
+            }),
+        ]
+        with self.settings(GEMINI_API_KEY='test-key'):
+            result = self.analyzer.analyze(self.observation)
+        self.assertEqual(result['risk_level'], 'medium')
+        self.assertEqual(mock_gemini_call.call_count, 2)
+
+    @patch('apps.hazards.services.cache')
+    @patch.object(__import__('apps.hazards.services', fromlist=['GeminiRiskAnalyzer']).GeminiRiskAnalyzer, '_gemini_call')
+    def test_verification_agrees_keeps_critical(self, mock_gemini_call, mock_cache):
+        mock_cache.get.return_value = None
+        mock_gemini_call.side_effect = [
+            json.dumps({
+                'risk_level': 'critical',
+                'risk_score': 95,
+                'guidance_en': 'Evacuate immediately.',
+                'guidance_sw': 'Hameni sasa.',
+                'summary': 'Critical flood risk.',
+                'confidence': 0.92,
+            }),
+            json.dumps({
+                'verified': True,
+                'recommended_risk_level': 'critical',
+                'reason': 'Data supports critical risk.',
+            }),
+        ]
+        with self.settings(GEMINI_API_KEY='test-key'):
+            result = self.analyzer.analyze(self.observation)
+        self.assertEqual(result['risk_level'], 'critical')
+        self.assertEqual(mock_gemini_call.call_count, 2)
+

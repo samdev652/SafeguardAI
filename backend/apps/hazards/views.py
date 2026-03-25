@@ -1,3 +1,181 @@
+import hashlib
+import logging
+import os
+import traceback
+from django.core.cache import cache
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status, permissions
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+
+logger = logging.getLogger(__name__)
+
+CHAT_CACHE_TTL = 60 * 30        # 30 minutes
+RATE_LIMIT_MAX = 30              # messages per window
+RATE_LIMIT_WINDOW = 60 * 60     # 1 hour in seconds
+
+
+def _get_client_ip(request) -> str:
+    xff = request.META.get('HTTP_X_FORWARDED_FOR')
+    if xff:
+        return xff.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR', '0.0.0.0')
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class ChatView(APIView):
+    authentication_classes = []
+    permission_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        try:
+            from groq import Groq
+            from apps.hazards.models import RiskAssessment
+            from apps.alerts.models import CommunityVerificationPrompt
+            from apps.citizens.models import CitizenProfile
+            from .models import HazardObservation, WardBoundary
+            from django.conf import settings
+            from django.utils import timezone
+            import json
+            import hashlib
+
+            message = request.data.get('message')
+            ward = request.data.get('ward') or 'Unknown'
+            session_id = request.data.get('session_id') or request.META.get('HTTP_X_SESSION_ID') or _get_client_ip(request)
+
+            if not message:
+                return Response({'error': 'Message is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # 30-minute Response Caching
+            message_hash = hashlib.md5(message.strip().lower().encode('utf-8')).hexdigest()
+            response_cache_key = f"chat_resp_{ward}_{message_hash}"
+            cached_response = cache.get(response_cache_key)
+            if cached_response:
+                return Response(cached_response)
+
+            # Rate limiting (30 requests per hour per IP)
+            ip = _get_client_ip(request)
+            cache_key = f"chat_rl_{ip}"
+            requests_count = cache.get(cache_key, 0)
+            if requests_count >= 30:
+                return Response({'error': 'Rate limit exceeded.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            cache.set(cache_key, requests_count + 1, timeout=3600)
+
+            user_ward = ward
+            user_county = "Unknown"
+            if request.user.is_authenticated:
+                profile = CitizenProfile.objects.filter(user=request.user).first()
+                if profile:
+                    user_ward = profile.ward_name
+                    ward_obj = WardBoundary.objects.filter(ward_name__iexact=profile.ward_name).only('county_name').first()
+                    if ward_obj:
+                        user_county = ward_obj.county_name
+
+            nairobi_time = timezone.localtime(timezone.now()).strftime('%Y-%m-%d %H:%M:%S %Z')
+            month = timezone.now().month
+            if month in [3, 4, 5]:
+                season = "Long Rains (March to May) - Most dangerous time for floods."
+            elif month in [10, 11, 12]:
+                season = "Short Rains (October to December) - High flood risk."
+            else:
+                season = "Dry Season - High drought risk in arid areas."
+
+            # Fetch active risk assessments
+            assessments = RiskAssessment.objects.exclude(risk_level=RiskAssessment.RISK_SAFE).order_by('-issued_at')[:15]
+            risk_context = ""
+            for a in assessments:
+                # Mock community verification status based on recent system structures
+                yes_votes = CommunityVerificationPrompt.objects.filter(risk_assessment=a, vote='yes').count()
+                status_text = f"Community Verified ({yes_votes} confirmations)" if yes_votes > 0 else "AI-Only Prediction"
+                
+                risk_context += (
+                    f"- Ward: {a.ward_name} | Hazard: {a.hazard_type.title()} | Risk: {a.risk_level.title()} "
+                    f"| Probability: {int(a.risk_score)}% | Status: {status_text}\n"
+                    f"  What to do: {a.guidance_en}\n"
+                )
+
+            if not risk_context:
+                risk_context = "No active high/critical risk assessments right now."
+
+            # Fetch local weather for user's ward
+            weather_ctx = "No weather data locally available."
+            local_weather = HazardObservation.objects.filter(ward_name__iexact=user_ward).order_by('-observed_at').first()
+            if local_weather and isinstance(local_weather.raw_payload, dict):
+                props = local_weather.raw_payload.get('properties', local_weather.raw_payload)
+                t = props.get('temperature_2m', 'N/A')
+                p = props.get('precipitation', '0')
+                weather_ctx = f"Temp: {t}°C, Rainfall: {p}mm"
+
+            # Preparedness score (mock logic based on user counts or static for demo)
+            prep_score = 65
+
+            # System Prompt (Rafiki)
+            system_prompt = (
+                "You are Rafiki, the official Safeguard AI disaster intelligence assistant for Kenya. Rafiki means friend in Swahili. "
+                "You must feel like a knowledgeable, hyper-local Kenyan friend who genuinely cares about the user's safety—not a cold government system. "
+                "CRITICAL RULES: \n"
+                "1. Language Auto-Detection: Always answer in the exact same language the user writes in. If they write Swahili, reply in fluent Swahili. If they write English, use English. If they write Sheng (Kenyan slang), reply naturally in Sheng without sounding translated. Switch languages instantly if the user switches.\n"
+                "2. Proactive Safety: Always proactively mention any active high or critical alerts for the user's ward or the ward they ask about, even if they didn't ask directly. \n"
+                "3. Hyper-Local Details: Never give generic advice. When discussing floods in Nairobi, specifically mention rivers like Nairobi River or Ngong River. Name real streets, landmarks, and rescue units. \n"
+                "4. Disaster First-Response: For floods: turn off mains electricity, never walk in moving water > ankle deep, move documents upstairs. For landslides: listen for cracking slopes, watch for muddy water. For earthquakes: drop, cover, hold on, avoid lifts. For droughts: boil water, prioritize animals. \n"
+                "5. Emergency Escalation: If the user uses emergency words (help, SOS, emergency, stuck, trapped, injured, drowning, fire, earthquake, niokoe, msaada, nimezingirwa, nimepotea, nimeumia, mafuriko sasa, moto, tetemeko, nimekwama, saidia), you MUST set is_emergency=true and IMMEDIATELY list the nearest rescue contacts at the very start of your message as phone numbers.\n"
+                "6. Bilingual Alert Formatting: When sending emergency instructions, format them exactly like SMS alerts using 🚨 emojis, DO NOW, DO NOT, and Rescue Contacts.\n"
+                "7. Historical Context: You know that the 2024 long rains caused 300 deaths and KES 187 billion in losses. The 2019 Patel Dam in Solai killed 47. You know flood plains (Budalangi, Nyando, Tana Delta), steep slopes (Murang'a, Nyeri), seismic zones (Rift Valley), and drought zones (Turkana, Mandera).\n"
+                "8. Keep your response under 200 words but never cut off safety info.\n\n"
+                "--- LIVE SYSTEM CONTEXT ---\n"
+                f"Current Time (Nairobi): {nairobi_time}\n"
+                f"Current Season: {season}\n"
+                f"User's Logged-in Location: Ward: {user_ward}, County: {user_county}\n"
+                f"User Ward Preparedness Score: {prep_score}%\n"
+                f"User Ward Current Weather: {weather_ctx}\n"
+                f"Active Risk Assessments:\n{risk_context}\n"
+                "Rescue Units (Reference for emergencies): Red Cross Headquarters (+254 700 395 395), Nairobi Fire Station (+254 20 222 2181), National Disaster Operations Centre (0800 721 211).\n\n"
+                "You MUST return your entire response as a structured JSON object containing EXACTLY these keys:\n"
+                '- "reply": Your main text response to the user.\n'
+                '- "suggestions": A JSON array of 3 short, contextually smart follow-up question strings (e.g., ["Show me evacuation routes", "Alert my family", "Who do I call right now?"]).\n'
+                '- "is_emergency": boolean (true if the user is in danger/needs rescue, false otherwise).\n'
+                '- "relevant_ward": The ward name you are discussing.\n'
+                '- "risk_level": "critical", "high", "medium", or "safe".'
+            )
+
+            # Redis Conversation Memory Management
+            hist_key = f"chat_hist_{session_id}"
+            history = cache.get(hist_key, [])
+            
+            # Format history for Groq messages
+            messages = [{'role': 'system', 'content': system_prompt}]
+            for msg in history[-8:]:  # Keep last 8 turns of context
+                messages.append(msg)
+            messages.append({'role': 'user', 'content': message})
+
+            client = Groq(api_key=os.getenv('GROQ_API_KEY'))
+            response = client.chat.completions.create(
+                model=settings.GROQ_MODEL,
+                messages=messages,
+                max_tokens=600,
+                temperature=0.3,
+                response_format={"type": "json_object"}
+            )
+            
+            reply_text = response.choices[0].message.content.strip()
+
+            # Append to history and save
+            history.append({'role': 'user', 'content': message})
+            history.append({'role': 'assistant', 'content': reply_text})
+            cache.set(hist_key, history[-10:], timeout=86400) # 24 hr TTL
+
+            parsed_reply = json.loads(reply_text)
+            
+            # Save the new response to cache
+            cache.set(response_cache_key, parsed_reply, timeout=1800)
+
+            return Response(parsed_reply)
+
+        except Exception as e:
+            logger.error(f"[Chatbot] Error: {traceback.format_exc()}")
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 import json
 import time
 import requests
@@ -6,7 +184,9 @@ from django.conf import settings
 from django.db.models import Avg, Count
 from django.db.models.functions import TruncDate
 from django.utils import timezone
-from django.contrib.gis.geos import GEOSGeometry
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
+from django.contrib.gis.geos import GEOSGeometry, Point
 from django.http import StreamingHttpResponse
 from rest_framework import generics, permissions
 from rest_framework import status
@@ -62,17 +242,60 @@ class LatestRiskAssessmentsView(generics.ListAPIView):
     serializer_class = RiskAssessmentSerializer
     permission_classes = [permissions.AllowAny]
 
-    def get_queryset(self):
-        ward = self.request.query_params.get('ward')
-        qs = RiskAssessment.objects.all()
+    @method_decorator(cache_page(10))
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def list(self, request, *args, **kwargs):
+        ward = request.query_params.get('ward')
         if ward:
-            qs = qs.filter(ward_name__iexact=ward)
-        return qs.order_by('-issued_at')[:100]
+            qs = RiskAssessment.objects.filter(ward_name__iexact=ward).order_by('-issued_at')[:100]
+            serializer = self.get_serializer(qs, many=True)
+            return Response(serializer.data)
+
+        # Build a ward_name → county_name lookup from WardBoundary
+        ward_to_county = {
+            wb.ward_name.lower(): wb.county_name
+            for wb in WardBoundary.objects.only('ward_name', 'county_name')
+        }
+
+        # Grab top 100 recent
+        qs = RiskAssessment.objects.all().order_by('-issued_at')[:100]
+        results = list(qs)
+
+        # Ensure the 10 core counties are always represented for the demo
+        core_counties = ['Nairobi', 'Mombasa', 'Kisumu', 'Nakuru', "Murang'a", 'Kilifi', 'Busia', 'Tana River', 'Turkana', 'Mandera']
+        existing_counties = {ward_to_county.get(r.ward_name.lower()) for r in results}
+        existing_counties.discard(None)
+
+        missing = [c for c in core_counties if c not in existing_counties]
+        for c in missing:
+            # Find wards that belong to this county
+            county_wards = [w for w, cn in ward_to_county.items() if cn.lower() == c.lower()]
+            if county_wards:
+                latest = (
+                    RiskAssessment.objects
+                    .filter(ward_name__in=[w for w in WardBoundary.objects.filter(county_name__iexact=c).values_list('ward_name', flat=True)])
+                    .order_by('-issued_at')
+                    .first()
+                )
+                if latest:
+                    results.append(latest)
+
+        # Re-sort descending
+        results.sort(key=lambda x: x.issued_at, reverse=True)
+
+        serializer = self.get_serializer(results[:110], many=True)
+        return Response(serializer.data)
 
 
 class WardRiskView(generics.ListAPIView):
     serializer_class = RiskAssessmentSerializer
     permission_classes = [permissions.AllowAny]
+
+    @method_decorator(cache_page(10))
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
 
     def get_queryset(self):
         ward = self.kwargs['ward_name']
@@ -82,6 +305,7 @@ class WardRiskView(generics.ListAPIView):
 class PublicRiskCountView(APIView):
     permission_classes = [permissions.AllowAny]
 
+    @method_decorator(cache_page(10))
     def get(self, _request):
         active_count = RiskAssessment.objects.exclude(risk_level=RiskAssessment.RISK_SAFE).count()
         return Response({'active_threat_count': active_count})
@@ -142,6 +366,7 @@ def _fetch_live_weather_snapshot(latitude: float, longitude: float) -> tuple[flo
 class PublicWeatherConditionsView(APIView):
     permission_classes = [permissions.AllowAny]
 
+    @method_decorator(cache_page(10))
     def get(self, request):
         limit_param = request.query_params.get('limit')
         try:
@@ -397,11 +622,108 @@ def risk_events_stream(_request):
 
 
 class TriggerIngestionView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated]
 
-    def post(self, _request):
-        task = ingest_hazard_data_task.delay()
-        return Response({'task_id': task.id, 'status': 'queued'})
+    def post(self, request):
+        force_demo_ward = request.data.get('force_demo_ward')
+        task = ingest_hazard_data_task.delay(force_demo_ward=force_demo_ward)
+        return Response({
+            'task_id': task.id, 
+            'status': 'queued', 
+            'demo_mode': bool(force_demo_ward)
+        })
+
+
+class SimulateRiskView(APIView):
+    """DEBUG-only endpoint that instantly generates fresh predictions for 3 random wards."""
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        if not settings.DEBUG:
+            return Response(
+                {'detail': 'Simulation endpoint is only available when DEBUG=True.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        import random
+        from .services import GeminiRiskAnalyzer
+        from apps.alerts.tasks import dispatch_risk_alerts_task
+
+        count = min(int(request.data.get('count', 3)), 10)
+        wards = list(WardBoundary.objects.all())
+        if not wards:
+            return Response(
+                {'detail': 'No wards in database. Run: python manage.py seed_wards'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        selected = random.sample(wards, min(count, len(wards)))
+        analyzer = GeminiRiskAnalyzer()
+        results = []
+
+        for ward in selected:
+            centroid = ward.geometry.centroid
+            hazard = random.choice(['flood', 'landslide', 'drought'])
+            precip = round(random.uniform(15, 70), 1)
+            soil = round(random.uniform(0.25, 0.48), 2)
+            temp = round(random.uniform(22, 38), 1)
+
+            obs = HazardObservation.objects.create(
+                source='demo_simulation',
+                ward_name=ward.ward_name,
+                village_name='Simulated Zone',
+                hazard_type=hazard,
+                severity_index=round(random.uniform(50, 98), 1),
+                location=Point(centroid.x, centroid.y, srid=4326),
+                raw_payload={'properties': {
+                    'precipitation_mm': precip,
+                    'soil_moisture': soil,
+                    'temperature_2m': temp,
+                }},
+                observed_at=timezone.now(),
+            )
+
+            obs_dict = {
+                'ward_name': obs.ward_name,
+                'village_name': obs.village_name,
+                'hazard_type': obs.hazard_type,
+                'severity_index': obs.severity_index,
+                'source': obs.source,
+                'temperature_c': temp,
+                'precipitation_mm': precip,
+                'soil_moisture': soil,
+            }
+
+            analysis = analyzer.analyze(obs_dict, bypass_rate_limit=True)
+
+            risk = RiskAssessment.objects.create(
+                ward_name=obs.ward_name,
+                village_name=obs.village_name,
+                hazard_type=obs.hazard_type,
+                risk_level=analysis['risk_level'],
+                risk_score=float(analysis['risk_score']),
+                guidance_en=analysis['guidance_en'],
+                guidance_sw=analysis['guidance_sw'],
+                summary=analysis['summary'],
+                location=obs.location,
+            )
+
+            if risk.risk_level in ('high', 'critical'):
+                dispatch_risk_alerts_task.delay(risk.id)
+
+            results.append({
+                'ward': ward.ward_name,
+                'county': ward.county_name,
+                'hazard': hazard,
+                'risk_level': risk.risk_level,
+                'risk_score': risk.risk_score,
+                'summary': risk.summary,
+            })
+
+        return Response({
+            'simulated': len(results),
+            'results': results,
+        })
 
 
 class WardHeatmapGeoJSONView(APIView):

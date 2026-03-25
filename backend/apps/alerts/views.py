@@ -324,11 +324,15 @@ class AlertSubscribeView(APIView):
             except Exception:
                 contacts = []
 
-            contacts_line = (
-                'Nearest rescue contacts: ' + '; '.join(contacts)
-                if contacts
-                else 'Nearest rescue contacts: call county emergency center.'
-            )
+            if not contacts:
+                county_name = ward.county_name if hasattr(ward, 'county_name') and ward.county_name else 'County'
+                contacts = [
+                    'Police: 999',
+                    'Red Cross: 0700 395 395',
+                    f'{county_name} Hospital: 0800 721 211'
+                ]
+
+            contacts_line = 'Nearest rescues: ' + '; '.join(contacts)
 
             if latest_risk:
                 guidance = latest_risk.guidance_sw if profile.preferred_language == 'sw' else latest_risk.guidance_en

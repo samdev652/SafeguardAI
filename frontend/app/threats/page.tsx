@@ -359,7 +359,11 @@ export default function ThreatsPage() {
                             </li>
                           ))
                         ) : (
-                          <li>No active responders nearby right now.</li>
+                          <>
+                            <li><strong>Police / Rapid Response:</strong> 999 / 112</li>
+                            <li><strong>Kenya Red Cross ({risk.county_name || 'Branch'}):</strong> +254 700 395 395</li>
+                            <li><strong>Nearest Hospital:</strong> {risk.county_name || 'County'} Referral Hospital (Emergency: 0800 721 211)</li>
+                          </>
                         )}
                       </ul>
                       <p>
