@@ -580,9 +580,14 @@ export default function PublicHomePage() {
       </section>
 
       <section id='for-counties' className='trust-bar'>
-        <span>Kenya Met Department</span>
-        <span>Google Gemini AI</span>
-        <span>Africa&apos;s Talking</span>
+        <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '32px', alignItems: 'center', opacity: 0.8, fontWeight: 700 }}>
+          <span>Kenya Met Department</span>
+          <span>Google Gemini AI</span>
+          <span>NASA POWER</span>
+          <span>USGS Earthquake Hazards</span>
+          <span>NOAA GFS</span>
+          <span>Africa&apos;s Talking</span>
+        </div>
       </section>
 
       <footer className='public-footer'>

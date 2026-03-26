@@ -134,6 +134,26 @@ export default function DashboardPage() {
   const [forecast, setForecast] = useState<DayForecast[] | null>(null);
   const [forecastError, setForecastError] = useState<string | null>(null);
   const [forecastLoading, setForecastLoading] = useState(false);
+  const [healthData, setHealthData] = useState<any>(null);
+
+  // Fetch system health status
+  useEffect(() => {
+    const fetchHealth = async () => {
+      try {
+        const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+        const res = await fetch(`${API_BASE_URL}/api/data/status/`);
+        if (res.ok) {
+           const data = await res.json();
+           setHealthData(data);
+        }
+      } catch (e) {
+        console.error("Health check failed", e);
+      }
+    };
+    fetchHealth();
+    const interval = window.setInterval(fetchHealth, 60000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   // Fetch forecast when ward changes
   useEffect(() => {
@@ -631,6 +651,30 @@ export default function DashboardPage() {
           <div className='feed-head'>
             <h2>Live Calamity Feed</h2>
             <p>Severity-sorted threat intelligence</p>
+          </div>
+
+          <div style={{ background: 'rgba(30, 41, 59, 0.45)', borderRadius: '12px', padding: '16px', border: '1px solid rgba(255,255,255,0.05)', marginBottom: '16px' }}>
+            <h3 style={{ fontSize: '0.7rem', color: '#94a3b8', textTransform: 'uppercase', marginBottom: '12px', letterSpacing: '0.05em', fontWeight: 700 }}>Science Engine Status</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 16px' }}>
+              {healthData && Object.entries(healthData).map(([name, status]: [string, any]) => {
+                if (name === 'overall_quality_score' || name === 'last_checked') return null;
+                const label = name.replace('_', ' ').toUpperCase();
+                const isActive = status.status === 'active';
+                return (
+                  <div key={name} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div style={{ 
+                      width: '7px', 
+                      height: '7px', 
+                      borderRadius: '50%', 
+                      background: isActive ? '#10b981' : '#f43f5e',
+                      boxShadow: isActive ? '0 0 8px rgba(16, 185, 129, 0.4)' : 'none'
+                    }} />
+                    <span style={{ fontSize: '0.75rem', color: '#cbd5e1', fontWeight: 500 }}>{label}</span>
+                  </div>
+                );
+              })}
+              {!healthData && <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Initializing sensors...</span>}
+            </div>
           </div>
 
           {role === 'citizen' ? (

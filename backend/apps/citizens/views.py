@@ -10,7 +10,7 @@ class CitizenRegisterView(generics.CreateAPIView):
     permission_classes = [permissions.AllowAny]
 
 
-class CitizenProfileView(generics.RetrieveAPIView):
+class CitizenProfileView(generics.RetrieveUpdateAPIView):
     serializer_class = CitizenProfileSerializer
     permission_classes = [permissions.IsAuthenticated]
 

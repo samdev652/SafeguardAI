@@ -1,7 +1,10 @@
 from django.contrib import admin
 from django.urls import include, path
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-from apps.hazards.views import CountyOverviewView, LocationSearchView, PublicCoverageStatsView, PublicStatsView, ChatView
+from apps.hazards.views import (
+    CountyOverviewView, LocationSearchView, PublicCoverageStatsView,
+    PublicStatsView, ChatView, DataStatusView, WardResolutionView
+)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -17,4 +20,6 @@ urlpatterns = [
     path('api/alerts/', include('apps.alerts.urls')),
     path('api/rescue/', include('apps.rescue.urls')),
     path('api/chat/', ChatView.as_view(), name='chat-endpoint'),
+    path('api/hazards/resolve-ward/', WardResolutionView.as_view(), name='resolve-ward'),
+    path('api/data/status/', DataStatusView.as_view(), name='data-status'),
 ]

@@ -60,6 +60,7 @@ class RiskAssessment(models.Model):
     community_verified_at = models.DateTimeField(null=True, blank=True)
     community_all_clear_at = models.DateTimeField(null=True, blank=True)
     issued_at = models.DateTimeField(auto_now_add=True)
+    data_sources_used = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ['-issued_at']

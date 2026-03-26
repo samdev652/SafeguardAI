@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import timedelta
 import sentry_sdk
 from dotenv import load_dotenv
+from celery.schedules import crontab
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
@@ -130,6 +131,10 @@ CELERY_BEAT_SCHEDULE = {
     'send-periodic-risk-updates-every-hour': {
         'task': 'apps.alerts.tasks.send_periodic_risk_updates_task',
         'schedule': 60 * 60,
+    },
+    'refresh-weather-cache-every-2-hours': {
+        'task': 'apps.hazards.tasks.refresh_static_weather_cache_task',
+        'schedule': crontab(minute='0', hour='*/2'),
     }
 }
 

@@ -1,5 +1,6 @@
 "use client";
 import React, { useState, useRef, useEffect } from "react";
+import { useSession } from "next-auth/react";
 
 const TEAL = "#00D4AA";
 const DARK_BG = "#0d1424";
@@ -38,6 +39,9 @@ export default function ChatWidget() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [typing, setTyping] = useState(false);
+  const [userWard, setUserWard] = useState<string | null>(null);
+  const [isLocating, setIsLocating] = useState(false);
+  const { data: session } = useSession();
   const scrollRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef<string>("");
   const openRef = useRef(open);
@@ -48,7 +52,88 @@ export default function ChatWidget() {
 
   useEffect(() => {
     sessionRef.current = generateSessionId();
+    
+    // Automatic Location Detection
+    const detectLocation = async () => {
+      // 1. Try GPS
+      if ("geolocation" in navigator) {
+        setIsLocating(true);
+        navigator.geolocation.getCurrentPosition(async (pos) => {
+          try {
+            const { latitude, longitude } = pos.coords;
+            const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+            const res = await fetch(`${API_BASE}/api/hazards/resolve-ward/?lat=${latitude}&lon=${longitude}`);
+            if (res.ok) {
+              const data = await res.json();
+              setUserWard(data.ward_name);
+              console.log("📍 GPS location detected:", data.ward_name);
+              
+              // Auto-update profile for logged in users
+              const token = (session as any)?.accessToken || localStorage.getItem("safeguard_token");
+              if (token) {
+                fetch(`${API_BASE}/api/citizens/me/`, {
+                  method: "PATCH",
+                  headers: { 
+                    "Authorization": `Bearer ${token}`,
+                    "Content-Type": "application/json"
+                  },
+                  body: JSON.stringify({
+                    ward_name: data.ward_name,
+                    latitude,
+                    longitude
+                  })
+                }).catch(e => console.error("Profile auto-update failed", e));
+              }
+
+              setIsLocating(false);
+              return; // Success
+            }
+          } catch (e) {
+            console.error("Location resolution failed", e);
+          }
+          setIsLocating(false);
+          checkProfile();
+        }, (err) => {
+          console.warn("Geolocation denied or failed", err);
+          setIsLocating(false);
+          checkProfile();
+        });
+      } else {
+        checkProfile();
+      }
+    };
+
+    const checkProfile = async () => {
+      const token = localStorage.getItem("safeguard_token");
+      if (token) {
+        try {
+          const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+          const res = await fetch(`${API_BASE}/api/citizens/me/`, {
+            headers: { "Authorization": `Bearer ${token}` }
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.ward_name) {
+              setUserWard(data.ward_name);
+              console.log("📍 Profile location used:", data.ward_name);
+            }
+          }
+        } catch (e) {
+          console.error("Profile fetch failed", e);
+        }
+      }
+    };
+
+    detectLocation();
   }, []);
+
+  // Sync with NextAuth session
+  useEffect(() => {
+    if ((session as any)?.wardName && !userWard) {
+      setUserWard((session as any).wardName);
+      console.log("📍 Ward synced from session:", (session as any).wardName);
+    }
+  }, [session, userWard]);
 
   useEffect(() => {
     const handleNewAlert = (e: Event) => {
@@ -111,10 +196,20 @@ export default function ChatWidget() {
     setLoading(true);
     
     try {
+      const token = (session as any)?.accessToken || localStorage.getItem("safeguard_token");
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/chat/`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, session_id: sessionRef.current }),
+        headers,
+        body: JSON.stringify({ 
+          message: text, 
+          session_id: sessionRef.current,
+          ward: userWard || undefined 
+        }),
       });
       const data = await res.json();
       
@@ -219,6 +314,16 @@ export default function ChatWidget() {
               <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#10b981", boxShadow: "0 0 10px #10b981" }} />
               Rafiki Intelligence
             </div>
+            {userWard && (
+              <div style={{ fontSize: "0.7rem", color: "#6b7280", background: "rgba(255,255,255,0.05)", padding: "2px 8px", borderRadius: 10 }}>
+                📍 {userWard}
+              </div>
+            )}
+            {isLocating && (
+              <div style={{ fontSize: "0.7rem", color: TEAL, animation: "blink 1s infinite" }}>
+                Detecting location...
+              </div>
+            )}
             <button
               aria-label="Close chat"
               onClick={() => setOpen(false)}

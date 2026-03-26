@@ -191,6 +191,7 @@ def ingest_hazard_data_task(force_demo_ward: str = None) -> dict:
             guidance_sw=analysis['guidance_sw'],
             summary=analysis['summary'],
             location=observation.location,
+            data_sources_used=analysis.get('data_sources_used', []),
         )
 
         if risk.risk_level in {RiskAssessment.RISK_HIGH, RiskAssessment.RISK_CRITICAL}:
@@ -209,4 +210,29 @@ def ingest_hazard_data_task(force_demo_ward: str = None) -> dict:
         'processed_items': len(all_items),
         'demo_mode': bool(force_demo_ward),
     }
+@shared_task
+def refresh_static_weather_cache_task():
+    import logging
+    from .models import WardBoundary
+    from .weather import fetch_nasa_power_data, fetch_usgs_earthquake_data, fetch_noaa_forecast_data
+
+    logger = logging.getLogger(__name__)
+    
+    # Pre-fetch USGS (cached globally for Kenya, single coord suffices)
+    fetch_usgs_earthquake_data(-1.2921, 36.8219)
+    
+    wards = WardBoundary.objects.all()
+    count = 0
+    for ward in wards:
+        centroid = ward.geometry.centroid
+        lat, lon = centroid.y, centroid.x
+        try:
+            fetch_nasa_power_data(lat, lon)
+            fetch_noaa_forecast_data(lat, lon)
+            count += 1
+        except Exception as e:
+            logger.error(f"Prefetch failed for ward {ward.ward_name}: {e}")
+            
+    logger.info(f"Refreshed static weather cache for {count} wards.")
+    return count
 

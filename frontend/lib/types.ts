@@ -14,6 +14,8 @@ export interface RiskAssessment {
   issued_at: string;
   latitude: number;
   longitude: number;
+  data_quality_score?: number;
+  data_sources_used?: string[];
 }
 
 export interface RescueUnit {

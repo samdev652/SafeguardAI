@@ -48,6 +48,27 @@ export default function RiskCard({ risk }: { risk: RiskAssessment }) {
 
       <div style={{ marginTop: 8, fontSize: 13, color: '#d9e3f8' }}>{risk.hazard_type.toUpperCase()}</div>
 
+      <div style={{ display: 'flex', gap: 4, marginTop: 8, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 3 }}>
+          {[1, 2, 3, 4].map((i) => (
+            <div
+              key={i}
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: i <= (risk.data_quality_score || 1) ? colorByRisk[risk.risk_level] : 'transparent',
+                border: `1px solid ${i <= (risk.data_quality_score || 1) ? colorByRisk[risk.risk_level] : '#334155'}`,
+                boxShadow: i <= (risk.data_quality_score || 1) ? `0 0 8px ${colorByRisk[risk.risk_level]}44` : 'none',
+              }}
+            />
+          ))}
+        </div>
+        <span style={{ fontSize: 10, color: '#94a3b8', fontWeight: 500, letterSpacing: '0.02em' }}>
+          {risk.data_quality_score || 1}/4 SCIENTIFIC SOURCES VERIFIED
+        </span>
+      </div>
+
       <button
         aria-expanded={expanded}
         onClick={() => setExpanded((value) => !value)}

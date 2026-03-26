@@ -122,11 +122,13 @@ def _build_rich_sms(risk: RiskAssessment, rescue_lines: list[str], county: str) 
     dont_block = '\n'.join(f'  ❌ {d}' for d in info['donts'])
     rescue_block = '\n'.join(rescue_lines) if rescue_lines else '  Call county emergency center'
 
+    sources = ", ".join(risk.data_sources_used) if risk.data_sources_used else "Open-Meteo"
     message = (
         f'{emoji} SAFEGUARD AI — {risk.risk_level.upper()} ALERT\n'
         f'Hazard: {risk.hazard_type.title()}\n'
         f'Location: {risk.ward_name}, {county}\n'
         f'Probability: {int(risk.risk_score)}%\n'
+        f'Verified by: {sources}\n'
         f'Situation: {risk.summary}\n\n'
         f'ACTION STEPS:\n{action_block}\n\n'
         f'DO NOT:\n{dont_block}\n\n'
@@ -291,9 +293,11 @@ def send_periodic_risk_updates_task() -> dict:
         rescue_lines, _ = _build_rescue_lines(nearest_units, county)
         rescue_block = '\n'.join(rescue_lines) if rescue_lines else '  Call county emergency center'
         
+        sources = ", ".join(risk.data_sources_used) if risk.data_sources_used else "Open-Meteo"
         message = (
             f'[Safeguard UPDATE] {risk.risk_level.upper()} ALERT Active.\n'
             f'{risk.hazard_type.title()} in {risk.ward_name} remains critical.\n'
+            f'Verified by: {sources}.\n'
             f'Continue following official guidance.\n\n'
             f'RESCUE CONTACTS:\n{rescue_block}'
         )

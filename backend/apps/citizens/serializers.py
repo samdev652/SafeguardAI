@@ -56,8 +56,8 @@ class CitizenRegistrationSerializer(serializers.ModelSerializer):
 
 
 class CitizenProfileSerializer(serializers.ModelSerializer):
-    latitude = serializers.SerializerMethodField()
-    longitude = serializers.SerializerMethodField()
+    latitude = serializers.FloatField(required=False)
+    longitude = serializers.FloatField(required=False)
 
     class Meta:
         model = CitizenProfile
@@ -66,8 +66,15 @@ class CitizenProfileSerializer(serializers.ModelSerializer):
             'preferred_language', 'channels', 'role', 'latitude', 'longitude', 'created_at'
         ]
 
-    def get_latitude(self, obj):
-        return obj.location.y
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['latitude'] = instance.location.y
+        ret['longitude'] = instance.location.x
+        return ret
 
-    def get_longitude(self, obj):
-        return obj.location.x
+    def update(self, instance, validated_data):
+        lat = validated_data.pop('latitude', None)
+        lon = validated_data.pop('longitude', None)
+        if lat is not None and lon is not None:
+            instance.location = Point(lon, lat, srid=4326)
+        return super().update(instance, validated_data)

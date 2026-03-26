@@ -225,18 +225,47 @@ class GeminiRiskAnalyzer:
                     'You MUST NOT return risk above medium.'
                 )
 
+        try:
+            from apps.hazards.weather import fetch_weather_for_location
+            geom = observation.get('geometry') or observation.get('location')
+            if hasattr(geom, 'x'):
+                lon, lat = geom.x, geom.y
+            elif isinstance(geom, dict) and 'coordinates' in geom:
+                lon, lat = geom['coordinates']
+            else:
+                lon, lat = 0.0, 0.0
+            weather_data = fetch_weather_for_location(lat, lon) if lon != 0.0 or lat != 0.0 else {}
+        except Exception as e:
+            logger.error(f"Failed to fetch enriched weather: {e}")
+            weather_data = {}
+
+        om = weather_data.get('open_meteo', {})
+        nasa = weather_data.get('nasa_power', {})
+        usgs = weather_data.get('usgs', {})
+        noaa = weather_data.get('noaa_gfs', {})
+        dq_score = weather_data.get('data_quality_score', 1)
+        sources = weather_data.get('data_sources', [])
+
+        enriched_text = "\nENRICHED MULTI-SOURCE WEATHER DATA:\n"
+        enriched_text += f"---\n[Open-Meteo current conditions]\n{json.dumps(om)}\n"
+        enriched_text += f"---\n[NASA POWER satellite data]\n{json.dumps(nasa)}\n"
+        if hazard_type == 'earthquake':
+            enriched_text += f"---\n[USGS seismic monitoring]\n{json.dumps(usgs)}\n"
+        enriched_text += f"---\n[NOAA 7-day forecast]\n{json.dumps(noaa)}\n"
+
+        enriched_text += "\nDATA QUALITY NOTE:\n"
+        enriched_text += f"You received data from {dq_score} out of 4 independent sources. "
+        enriched_text += "When all 4 sources agree on conditions it should reflect high confidence, when sources disagree it should be conservative and reflect that uncertainty in a lower confidence score.\n"
+
         hard_rules = (
             '\n\nHARD RULES (you MUST follow these):\n'
-            '1. NEVER return high or critical risk without citing a specific number '
-            '   from the input weather data that exceeds the threshold above.\n'
+            '1. NEVER return high or critical risk without citing a specific number from the input data that exceeds the threshold.\n'
             '2. NEVER invent or assume data values not present in the input.\n'
-            '3. NEVER predict earthquake risk above medium for counties outside '
-            '   the Rift Valley, Nairobi, and coastal seismic zones '
-            '   (Mombasa, Kwale, Kilifi, Tana River, Lamu).\n'
-            '4. If weather data is missing or incomplete, return risk_level "safe" '
-            '   and note the missing data in the summary. Do NOT guess.\n'
-            '5. The confidence field must be a float between 0.0 and 1.0 reflecting '
-            '   how certain you are given the available data.'
+            '3. NEVER predict earthquake risk above medium for counties outside the Rift Valley, Nairobi, and coastal seismic zones.\n'
+            '4. If USGS reports any earthquake above magnitude 3.5 within 100 kilometres of the location in the last 7 days the earthquake risk must be at least medium.\n'
+            '5. If NASA POWER reports 30-day rainfall more than 50 percent above the seasonal normal the flood risk must be at least medium.\n'
+            '6. If NASA POWER avg_soil_moisture_root is above 0.700 and the NOAA forecast shows more than 50mm of rain in the next 3 days the landslide risk must be at least high for locations in hilly counties including Murang\'a Nyeri Elgeyo Marakwet Kericho and Nandi.\n'
+            '7. The confidence field must be a float between 0.0 and 1.0 reflecting how certain you are given the available data.'
         )
 
         prompt = (
@@ -246,9 +275,12 @@ class GeminiRiskAnalyzer:
             f'{seismic_note}\n\n'
             'Return JSON only with keys: risk_level (safe|medium|high|critical), '
             'risk_score (0-100), guidance_en, guidance_sw, summary, confidence (0.0-1.0).\n\n'
-            f'Input weather data: {json.dumps(observation)}'
+            f'Input event data: {json.dumps(observation)}'
+            f'{enriched_text}'
             f'{hard_rules}'
         )
+
+        self._current_sources = sources  # Store for later appending to result
 
         try:
             text = self._gemini_call(prompt)
@@ -286,6 +318,8 @@ class GeminiRiskAnalyzer:
 
             # --- Second verification call for high/critical ---
             result = self._verify_assessment(observation, result)
+
+            result['data_sources_used'] = getattr(self, '_current_sources', [])
 
             # --- Record rate limit after successful call ---
             self._set_rate_limit(observation)
@@ -364,6 +398,7 @@ class GeminiRiskAnalyzer:
             'guidance_en': 'Move to higher ground and keep emergency contacts ready.',
             'guidance_sw': 'Nenda sehemu ya juu na uwe na nambari za dharura tayari.',
             'summary': f'{observation.get("hazard_type", "hazard").title()} risk is {risk_level}.',
+            'data_sources_used': getattr(self, '_current_sources', [])
         }
 
 

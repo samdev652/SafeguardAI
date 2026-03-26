@@ -41,6 +41,7 @@ class Command(BaseCommand):
                 guidance_sw=result['guidance_sw'],
                 summary=result['summary'],
                 location=centroid,
+                data_sources_used=result.get('data_sources_used', []),
             )
             count += 1
         self.stdout.write(self.style.SUCCESS(f'Simulated risk events for {count} wards.'))
